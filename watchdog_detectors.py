@@ -64,9 +64,18 @@ def _finding(
     }
 
 
+def _active_donors(conn: sqlite3.Connection) -> list[dict]:
+    """Donors still in play (exclude auto-purged test fixtures)."""
+    return [
+        d
+        for d in fetch_all(conn, "donors")
+        if (d.get("status") or "") != "purged_test"
+    ]
+
+
 def scan_duplicates(conn: sqlite3.Connection) -> list[dict]:
     findings: list[dict] = []
-    donors = fetch_all(conn, "donors")
+    donors = _active_donors(conn)
 
     # Exact email duplicates (ignore null/blank)
     by_email: dict[str, list[dict]] = {}
@@ -153,7 +162,7 @@ def scan_duplicates(conn: sqlite3.Connection) -> list[dict]:
 
 def scan_incomplete(conn: sqlite3.Connection) -> list[dict]:
     findings: list[dict] = []
-    donors = fetch_all(conn, "donors")
+    donors = _active_donors(conn)
     requiredish = ["first_name", "last_name", "email", "phone", "status"]
 
     for d in donors:
@@ -207,7 +216,7 @@ def scan_incomplete(conn: sqlite3.Connection) -> list[dict]:
 
 def scan_unknown_values(conn: sqlite3.Connection) -> list[dict]:
     findings: list[dict] = []
-    donors = fetch_all(conn, "donors")
+    donors = _active_donors(conn)
     text_fields = [
         "first_name", "last_name", "email", "phone", "status",
         "address_line1", "city", "state", "postal_code", "ssn_last4", "notes",
@@ -260,7 +269,8 @@ def scan_unknown_values(conn: sqlite3.Connection) -> list[dict]:
 
 def scan_referential_integrity(conn: sqlite3.Connection) -> list[dict]:
     findings: list[dict] = []
-    donor_ids = {d["id"] for d in fetch_all(conn, "donors")}
+    all_donors = fetch_all(conn, "donors")
+    donor_ids = {d["id"] for d in all_donors}
 
     for table, fk in (("donations", "donor_id"), ("interactions", "donor_id")):
         for row in fetch_all(conn, table):
@@ -279,11 +289,11 @@ def scan_referential_integrity(conn: sqlite3.Connection) -> list[dict]:
                     )
                 )
 
-    # Donors with no activity (stale / possible bloat)
+    # Donors with no activity (stale / possible bloat) — skip purged fixtures
     donation_donors = {r["donor_id"] for r in fetch_all(conn, "donations")}
     interaction_donors = {r["donor_id"] for r in fetch_all(conn, "interactions")}
     active = donation_donors | interaction_donors
-    for d in fetch_all(conn, "donors"):
+    for d in _active_donors(conn):
         if d["id"] not in active:
             findings.append(
                 _finding(
@@ -306,7 +316,7 @@ def scan_referential_integrity(conn: sqlite3.Connection) -> list[dict]:
 
 def scan_security_risks(conn: sqlite3.Connection) -> list[dict]:
     findings: list[dict] = []
-    donors = fetch_all(conn, "donors")
+    donors = _active_donors(conn)
 
     for d in donors:
         ssn = (d.get("ssn_last4") or "").strip()
@@ -327,7 +337,12 @@ def scan_security_risks(conn: sqlite3.Connection) -> list[dict]:
             )
 
         notes = d.get("notes") or ""
-        if CARD_RE.search(notes) or CVV_RE.search(notes):
+        # Ignore already-redacted markers from prior guardian passes
+        if "[REDACTED_PAN]" in notes or "[REDACTED_CVV]" in notes:
+            live_notes = notes.replace("[REDACTED_PAN]", "").replace("[REDACTED_CVV]", "")
+        else:
+            live_notes = notes
+        if CARD_RE.search(live_notes) or CVV_RE.search(live_notes):
             findings.append(
                 _finding(
                     category="security",

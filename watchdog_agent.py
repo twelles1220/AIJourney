@@ -1,9 +1,14 @@
 """
-Watchdog Agent — scans CRM/database tables for data bloat and recommends
-next actions that protect data quality, integrity, and security.
+Watchdog Agent — continuous guardian for CRM data quality, integrity, and security.
 
-Mirrors the CRM chat agent's agentic loop + prompt caching pattern, but
-exposes read-only audit tools over a sample (or pluggable) database.
+Capabilities:
+1. Audit databases for data bloat (duplicates, incomplete, unknowns, orphans, PII leaks)
+2. Recommend prioritized remediation plans
+3. Stay resident and auto-clean *safe* bad data (redact, normalize, purge fixtures, orphans)
+4. Quarantine incomplete/tainted records and escalate merges that need a human
+5. Guard new writes at ingest so bad data never lands
+
+Mirrors the CRM chat agent's agentic loop + prompt caching pattern.
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from watchdog_db import connect
+from watchdog_db import connect, fetch_all, open_db
 from watchdog_detectors import (
     inspect_inventory,
     run_full_audit,
@@ -21,6 +26,13 @@ from watchdog_detectors import (
     scan_security_risks,
     scan_unknown_values,
     suggest_actions,
+)
+from watchdog_guardian import (
+    auto_remediate,
+    guard_donor_ingest,
+    insert_donor_guarded,
+    run_continuous,
+    run_guardian_cycle,
 )
 
 _client: Any = None
@@ -35,8 +47,9 @@ def _get_client():
         _client = anthropic.Anthropic()
     return _client
 
+
 # ---------------------------------------------------------------------------
-# Tools — the bridge between Claude and the database scanners
+# Tools — audit + continuous guardian controls
 # ---------------------------------------------------------------------------
 
 WATCHDOG_TOOLS = [
@@ -105,11 +118,80 @@ WATCHDOG_TOOLS = [
             },
         },
     },
+    {
+        "name": "apply_auto_remediation",
+        "description": (
+            "Apply the Watchdog guardian's safe auto-clean policies to the database: "
+            "redact PAN/CVV, truncate full SSNs to last4, nullify placeholders, "
+            "purge test fixtures, delete orphan child rows, quarantine incomplete records. "
+            "Duplicate merges are escalated for humans — never auto-merged. "
+            "Set dry_run=true to preview without writing."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, report what would change without mutating.",
+                },
+            },
+        },
+    },
+    {
+        "name": "guard_donor_write",
+        "description": (
+            "Validate a new donor record through the ingest guard. "
+            "Rejects PCI/test/duplicate/invalid payloads; sanitizes placeholders; "
+            "optionally inserts when decision is accept/accept_sanitized and insert=true."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "record": {
+                    "type": "object",
+                    "description": "Donor fields (first_name, last_name, email, phone, notes, ...).",
+                },
+                "insert": {
+                    "type": "boolean",
+                    "description": "If true, write the sanitized record when accepted.",
+                },
+            },
+            "required": ["record"],
+        },
+    },
+    {
+        "name": "run_guardian_cycle",
+        "description": (
+            "Run one full resident-guardian cycle against the persistent DB: "
+            "scan → auto-remediate → return before/after counts, applied actions, "
+            "and open human escalations."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean"},
+            },
+        },
+    },
+    {
+        "name": "list_escalations",
+        "description": "List open human-escalation items (e.g. duplicate merges) from the guardian.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["open", "resolved", "all"],
+                    "description": "Filter by escalation status (default open).",
+                },
+            },
+        },
+    },
 ]
 
 
-def _run_scans(categories: list[str]) -> dict:
-    with connect() as conn:
+def _run_scans(categories: list[str], *, memory: bool = True) -> dict:
+    with connect(memory=memory) as conn:
         if "all" in categories:
             return run_full_audit(conn)
 
@@ -145,12 +227,12 @@ def _run_scans(categories: list[str]) -> dict:
 
 
 def _execute_tool(name: str, tool_input: dict) -> str:
-    """Dispatch a tool call against the sample DB. Swap connect() for prod DBs."""
+    """Dispatch a tool call against the sample / persistent DB."""
     print(f"\n[WATCHDOG TOOL] → {name}")
     print(json.dumps(tool_input, indent=2))
 
     if name == "inspect_database":
-        with connect() as conn:
+        with connect(memory=True) as conn:
             result = inspect_inventory(conn)
         return json.dumps(result, indent=2)
 
@@ -168,36 +250,73 @@ def _execute_tool(name: str, tool_input: dict) -> str:
         plan = {
             "principle": (
                 "Prioritize security exposure first, then referential/identity "
-                "integrity, then completeness and bloat reduction."
+                "integrity, then completeness and bloat reduction. "
+                "Auto-clean safe issues; escalate duplicate merges to humans."
             ),
             "action_count": len(actions),
             "actions": actions,
         }
         return json.dumps(plan, indent=2, default=str)
 
+    if name == "apply_auto_remediation":
+        dry_run = bool(tool_input.get("dry_run", False))
+        with connect(memory=True) as conn:
+            result = auto_remediate(conn, dry_run=dry_run)
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "guard_donor_write":
+        record = tool_input.get("record") or {}
+        do_insert = bool(tool_input.get("insert", False))
+        if do_insert:
+            with connect(memory=True) as conn:
+                result = insert_donor_guarded(conn, record)
+            return json.dumps(result, indent=2, default=str)
+        result = guard_donor_ingest(record)
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "run_guardian_cycle":
+        dry_run = bool(tool_input.get("dry_run", False))
+        result = run_guardian_cycle(dry_run=dry_run)
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "list_escalations":
+        status = tool_input.get("status") or "open"
+        conn = open_db(memory=False, seed=True)
+        try:
+            rows = fetch_all(conn, "watchdog_escalations")
+            if status != "all":
+                rows = [r for r in rows if r.get("status") == status]
+            return json.dumps({"count": len(rows), "escalations": rows}, indent=2, default=str)
+        finally:
+            conn.close()
+
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 
 SYSTEM_PROMPT = """\
-You are Watchdog, an expert data-quality agent for nonprofit CRM and operational databases \
-(Salesforce, Bloomerang, Kindful, and similar warehouses).
+You are Watchdog, a resident data-quality guardian for nonprofit CRM and operational \
+databases (Salesforce, Bloomerang, Kindful, and similar warehouses).
 
 Your job:
-1. Inspect the connected database schema.
-2. Sift for data bloat and quality defects — duplicates, incomplete records, \
-placeholder/unknown values, orphaned rows, stale profiles, and security exposures \
-(PII/PAN in free text, over-retained identifiers).
-3. Recommend a concrete next course of action that best protects \
+1. Inspect schema and sift for data bloat — duplicates, incomplete records, \
+placeholder/unknown values, orphaned rows, stale profiles, and security exposures.
+2. Recommend (and when asked, execute) remediations that protect \
 **data quality**, **integrity**, and **security**.
+3. Stay in the system: use auto-remediation and ingest guards so bad data is cleaned \
+or blocked as it appears. Escalate only what requires human judgment.
+
+POLICY TIERS (never violate these):
+- AUTO: redact PAN/CVV, truncate full SSN→last4, nullify placeholders, purge test fixtures, \
+delete orphan child rows.
+- QUARANTINE: soft-isolate incomplete/tainted donors from outreach/exports.
+- ESCALATE: duplicate merges / identity collisions — propose a plan, do not auto-merge.
+- REJECT: block PCI/test/invalid payloads at ingest.
 
 CRITICAL BEHAVIORS:
-- Grounding: Only cite findings returned by your tools. Never invent record IDs or counts.
-- Priority: Security (critical) > integrity/duplicates > incompleteness/unknowns > low-impact bloat.
-- Actionability: Every recommendation must name who/what to change (table, fields, record ids) \
-and the control to prevent recurrence (constraint, validation, retention rule).
-- Safety: You are read-only. Do not claim you deleted or merged data — propose the change.
-- Formatting: Lead with an executive summary (counts by severity), then a numbered action plan, \
-then optional detail. Use scannable markdown.
+- Grounding: Only cite findings/actions returned by your tools. Never invent record IDs.
+- Priority: Security (critical) > integrity/duplicates > incompleteness/unknowns > bloat.
+- Honesty: Distinguish what you auto-cleaned vs. what you escalated vs. what you only recommend.
+- Formatting: Lead with an executive summary, then actions taken / escalations, then next steps.
 """
 
 
@@ -208,7 +327,7 @@ def run_watchdog_agent(
     """
     Run a single turn of the Watchdog agent.
 
-    Returns the agent's final text reply after audit tool calls complete.
+    Returns the agent's final text reply after tool calls complete.
     """
     messages = (chat_history or []) + [{"role": "user", "content": user_message}]
 
@@ -251,32 +370,143 @@ def run_watchdog_agent(
 
 
 def run_audit_report(categories: list[str] | None = None) -> dict:
-    """
-    Non-LLM entry point: run detectors + remediation plan deterministically.
-
-    Useful for cron/CI jobs and for demos without an API key.
-    """
+    """Deterministic audit + remediation plan (no API key required)."""
     audit = _run_scans(categories or ["all"])
     audit["remediation_plan"] = suggest_actions(audit["findings"])
     return audit
 
 
 if __name__ == "__main__":
+    import argparse
     import os
     import sys
+    import tempfile
+    from pathlib import Path
 
-    # Default: deterministic audit (no API key required) so the demo always works.
-    # Pass --agent to exercise the full Claude tool loop.
-    if "--agent" in sys.argv:
+    parser = argparse.ArgumentParser(description="Watchdog data-quality guardian")
+    parser.add_argument(
+        "--agent",
+        action="store_true",
+        help="Run the Claude tool-loop (requires ANTHROPIC_API_KEY)",
+    )
+    parser.add_argument(
+        "--remediate",
+        action="store_true",
+        help="Run one auto-remediation pass on an ephemeral seeded DB and print the report",
+    )
+    parser.add_argument(
+        "--guardian-cycle",
+        action="store_true",
+        help="Run one persistent-DB guardian cycle (scan + auto-clean + escalate)",
+    )
+    parser.add_argument(
+        "--continuous",
+        action="store_true",
+        help="Keep Watchdog resident: repeated guardian cycles",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=5.0,
+        help="Seconds between continuous cycles (default 5)",
+    )
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=3,
+        help="Max cycles for --continuous (default 3; use 0 for forever)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview remediations without writing",
+    )
+    parser.add_argument(
+        "--ingest-demo",
+        action="store_true",
+        help="Demo ingest guard accepting/rejecting sample donor writes",
+    )
+    parser.add_argument(
+        "--db",
+        type=str,
+        default=None,
+        help="Persistent SQLite path (default: watchdog_crm.db)",
+    )
+    args = parser.parse_args()
+
+    if args.agent:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             print("ANTHROPIC_API_KEY is required for --agent mode.", file=sys.stderr)
             sys.exit(1)
         reply = run_watchdog_agent(
-            "Audit the CRM database for data bloat and tell me what to do next "
-            "to improve quality, integrity, and security."
+            "Audit the CRM database, auto-clean anything safe, and tell me what "
+            "still needs a human for quality, integrity, and security."
         )
         print("\nWatchdog reply:")
         print(reply)
+    elif args.ingest_demo:
+        samples = [
+            {
+                "first_name": "Clean",
+                "last_name": "Donor",
+                "email": "clean.donor@example.com",
+                "phone": "555-0200",
+                "notes": "Interested in volunteering",
+            },
+            {
+                "first_name": "Bad",
+                "last_name": "Card",
+                "email": "bad.card@example.com",
+                "notes": "Card 4111-1111-1111-1111 CVV 123",
+            },
+            {
+                "first_name": "Test",
+                "last_name": "User",
+                "email": "test@test.com",
+            },
+            {
+                "first_name": "Pat",
+                "last_name": "Lee",
+                "email": "pat.lee@example.com",
+                "ssn_last4": "123456789",
+                "city": "N/A",
+            },
+        ]
+        with connect(memory=True) as conn:
+            for sample in samples:
+                result = insert_donor_guarded(conn, sample)
+                print(json.dumps({"input": sample, "result": result}, indent=2, default=str))
+    elif args.remediate:
+        with connect(memory=True) as conn:
+            before = run_full_audit(conn)["finding_count"]
+            report = auto_remediate(conn, dry_run=args.dry_run)
+            after = run_full_audit(conn)["finding_count"]
+        print(
+            json.dumps(
+                {"before": before, "after": after, "remediation": report},
+                indent=2,
+                default=str,
+            )
+        )
+    elif args.guardian_cycle or args.continuous:
+        db_path = args.db
+        if db_path is None:
+            # Use a temp DB for demos so we don't clobber a developer's file unexpectedly
+            db_path = str(Path(tempfile.gettempdir()) / "watchdog_guardian_demo.db")
+            if Path(db_path).exists():
+                Path(db_path).unlink()
+        if args.continuous:
+            max_cycles = None if args.max_cycles == 0 else args.max_cycles
+            run_continuous(
+                interval_seconds=args.interval,
+                max_cycles=max_cycles,
+                db_path=db_path,
+                dry_run=args.dry_run,
+                stop_when_clean=True,
+            )
+        else:
+            report = run_guardian_cycle(db_path=db_path, dry_run=args.dry_run)
+            print(json.dumps(report, indent=2, default=str))
     else:
         report = run_audit_report()
         print(json.dumps(report, indent=2, default=str))
