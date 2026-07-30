@@ -6,4 +6,5 @@ venv/
 *.egg-info/
 .pytest_cache/
 watchdog_crm.db
-*.db
+outputs/
+samples/*.bak

@@ -1,1 +1,2 @@
 anthropic>=0.40.0
+rapidfuzz>=3.0.0

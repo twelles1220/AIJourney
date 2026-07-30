@@ -1,0 +1,10 @@
+Donor Name,Email Address,Phone,Mailing Address,Status,Notes
+Alex Smith,alex.smith@example.com,555-0101,"12 Oak St, Austin 78701",Active,Major donor
+Alexander Smith,alex.smith@example.com,555-0199,"12 Oak Street, Austin TX 78701",Active,Possible duplicate
+Jon Smyth,jon.smyth@example.com,555-7777,"100 Main St Denver 80202",N/A,
+John Smith,john.smith@example.org,555-7778,"100 Main Street, Denver, CO 80202",active,
+Unknown Donor,unknown@unknown.com,000-000-0000,N/A,Unknown,TBD import
+Test User,test@test.com,555-0000,n/a,inactive,QA fixture
+Sam Nguyen,,,,"",active,Walk-in incomplete
+Jordan Lee,jordan.lee@example.org,555-0102,"88 Pine Ave, Denver 80202",Active,
+Jordon Lee,jordan.lee@examp1e.org,555-0102,"88 Pine Avenue Denver CO",Active,Typo email domain

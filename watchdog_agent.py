@@ -34,6 +34,7 @@ from watchdog_guardian import (
     run_continuous,
     run_guardian_cycle,
 )
+from agents.orchestrator import list_agents, route_findings_batch, route_task
 
 _client: Any = None
 
@@ -187,6 +188,90 @@ WATCHDOG_TOOLS = [
             },
         },
     },
+    {
+        "name": "list_specialist_agents",
+        "description": (
+            "List registered specialist agents Watchdog can dispatch to "
+            "(schema mapper, fuzzy match, RPA bypass, synthetic data, executive reporting)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "dispatch_to_agent",
+        "description": (
+            "Route a task or finding to the proper specialist agent and optionally execute it. "
+            "If no agent exists for the capability, returns a recommend_build specification "
+            "instead of inventing behavior. Use execute=false to preview routing only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "Natural-language description of the work to do.",
+                },
+                "capability": {
+                    "type": "string",
+                    "enum": [
+                        "schema_normalize",
+                        "fuzzy_match",
+                        "rpa_merge",
+                        "synthetic_data",
+                        "executive_report",
+                    ],
+                },
+                "finding_category": {
+                    "type": "string",
+                    "enum": [
+                        "duplicate",
+                        "incomplete",
+                        "unknown_value",
+                        "integrity",
+                        "bloat",
+                        "security",
+                    ],
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Force a specific agent id if known.",
+                },
+                "payload": {
+                    "type": "object",
+                    "description": "Agent-specific inputs (csv_path, metrics, merge_queue, ...).",
+                },
+                "execute": {
+                    "type": "boolean",
+                    "description": "Run the agent when matched (default true).",
+                },
+            },
+            "required": ["task"],
+        },
+    },
+    {
+        "name": "route_watchdog_findings",
+        "description": (
+            "Take Watchdog findings and group them by specialist agent. "
+            "Surfaces recommend_build entries when a needed agent is missing."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "findings": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Findings from scan_data_bloat. If omitted, runs a fresh full scan.",
+                },
+                "execute": {
+                    "type": "boolean",
+                    "description": "If true, execute each matched agent (usually leave false).",
+                },
+            },
+        },
+    },
 ]
 
 
@@ -290,33 +375,59 @@ def _execute_tool(name: str, tool_input: dict) -> str:
         finally:
             conn.close()
 
+    if name == "list_specialist_agents":
+        return json.dumps({"agents": list_agents()}, indent=2)
+
+    if name == "dispatch_to_agent":
+        result = route_task(
+            tool_input.get("task") or "",
+            capability=tool_input.get("capability"),
+            finding_category=tool_input.get("finding_category"),
+            agent_id=tool_input.get("agent_id"),
+            payload=tool_input.get("payload") or {},
+            execute=bool(tool_input.get("execute", True)),
+        )
+        return json.dumps(result, indent=2, default=str)
+
+    if name == "route_watchdog_findings":
+        findings = tool_input.get("findings")
+        if not findings:
+            findings = _run_scans(["all"])["findings"]
+        result = route_findings_batch(
+            findings, execute=bool(tool_input.get("execute", False))
+        )
+        return json.dumps(result, indent=2, default=str)
+
     return json.dumps({"error": f"Unknown tool: {name}"})
 
 
 SYSTEM_PROMPT = """\
-You are Watchdog, a resident data-quality guardian for nonprofit CRM and operational \
+You are Watchdog, a resident data-quality guardian and orchestrator for nonprofit CRM \
 databases (Salesforce, Bloomerang, Kindful, and similar warehouses).
 
 Your job:
 1. Inspect schema and sift for data bloat — duplicates, incomplete records, \
 placeholder/unknown values, orphaned rows, stale profiles, and security exposures.
-2. Recommend (and when asked, execute) remediations that protect \
-**data quality**, **integrity**, and **security**.
-3. Stay in the system: use auto-remediation and ingest guards so bad data is cleaned \
-or blocked as it appears. Escalate only what requires human judgment.
+2. Auto-clean safe issues; quarantine incomplete/tainted rows; escalate merges that need humans.
+3. **Dispatch** specialized work to the proper agent via dispatch_to_agent / route_watchdog_findings:
+   - schema_mapper → messy CSV headers, mashed names, buried zips
+   - fuzzy_match → near-duplicates / typos (auto >=98%, review 80–97%)
+   - rpa_bypass → execute *approved* merges in legacy CRM UIs
+   - synthetic_data → privacy-safe test corpora before live runs
+   - executive_report → client-ready ROI / hygiene summaries
+4. If no agent exists for a task, return a **recommend_build** spec — never invent a phantom agent.
 
-POLICY TIERS (never violate these):
-- AUTO: redact PAN/CVV, truncate full SSN→last4, nullify placeholders, purge test fixtures, \
-delete orphan child rows.
-- QUARANTINE: soft-isolate incomplete/tainted donors from outreach/exports.
-- ESCALATE: duplicate merges / identity collisions — propose a plan, do not auto-merge.
-- REJECT: block PCI/test/invalid payloads at ingest.
+POLICY TIERS:
+- AUTO / QUARANTINE / REJECT: handled by guardian tools
+- ESCALATE: human review OR specialist handoff (fuzzy → optional RPA)
+- RECOMMEND_BUILD: capability gap
 
 CRITICAL BEHAVIORS:
-- Grounding: Only cite findings/actions returned by your tools. Never invent record IDs.
-- Priority: Security (critical) > integrity/duplicates > incompleteness/unknowns > bloat.
-- Honesty: Distinguish what you auto-cleaned vs. what you escalated vs. what you only recommend.
-- Formatting: Lead with an executive summary, then actions taken / escalations, then next steps.
+- Grounding: Only cite tool results. Never invent record IDs or metrics.
+- Sequencing: normalize (schema_mapper) before fuzzy_match; fuzzy decides before rpa_bypass executes.
+- RPA safety: only send approved/auto_merge queues to rpa_bypass.
+- Honesty: distinguish auto-cleaned vs dispatched vs recommend_build.
+- Formatting: executive summary → actions taken / handoffs → escalations / build recommendations.
 """
 
 
@@ -432,9 +543,99 @@ if __name__ == "__main__":
         default=None,
         help="Persistent SQLite path (default: watchdog_crm.db)",
     )
+    parser.add_argument(
+        "--pipeline",
+        action="store_true",
+        help=(
+            "Run the full specialist pipeline on samples/bloomerang_messy_export.csv: "
+            "schema_mapper → fuzzy_match → rpa_bypass → executive_report "
+            "(plus a recommend_build demo for an unknown task)"
+        ),
+    )
+    parser.add_argument(
+        "--list-agents",
+        action="store_true",
+        help="Print registered specialist agents",
+    )
     args = parser.parse_args()
 
-    if args.agent:
+    if args.list_agents:
+        print(json.dumps({"agents": list_agents()}, indent=2))
+    elif args.pipeline:
+        sample = Path("samples/bloomerang_messy_export.csv")
+        out_root = Path("outputs/pipeline_demo")
+        # 1) Schema map
+        mapped = route_task(
+            "Normalize this Bloomerang export with mashed names and buried zips",
+            payload={
+                "csv_path": str(sample),
+                "output_dir": str(out_root / "schema_mapper"),
+            },
+        )
+        print(json.dumps({"step": "schema_mapper", "result": mapped}, indent=2, default=str))
+        normalized_csv = (
+            (mapped.get("result") or {}).get("artifacts", {}).get("normalized_csv")
+        )
+        # 2) Fuzzy match
+        fuzzy = route_task(
+            "Fuzzy-match near duplicates with typos",
+            payload={
+                "csv_path": normalized_csv,
+                "output_dir": str(out_root / "fuzzy_match"),
+            },
+        )
+        print(json.dumps({"step": "fuzzy_match", "result": fuzzy}, indent=2, default=str))
+        auto_queue = (fuzzy.get("result") or {}).get("artifacts", {}).get("auto_merge")
+        # 3) RPA simulator on approved auto-merges
+        rpa = route_task(
+            "Execute approved merges via RPA in SAM",
+            payload={
+                "merge_queue": auto_queue or [],
+                "crm_system": "sam",
+                "output_dir": str(out_root / "rpa_bypass"),
+            },
+        )
+        print(json.dumps({"step": "rpa_bypass", "result": rpa}, indent=2, default=str))
+        # 4) Synthetic data from the messy schema
+        synth = route_task(
+            "Generate synthetic dummy data mimicking this CRM export",
+            payload={
+                "csv_path": str(sample),
+                "row_count": 200,
+                "output_dir": str(out_root / "synthetic_data"),
+            },
+        )
+        print(json.dumps({"step": "synthetic_data", "result": synth}, indent=2, default=str))
+        # 5) Executive report
+        fuzzy_arts = (fuzzy.get("result") or {}).get("artifacts") or {}
+        rpa_arts = (rpa.get("result") or {}).get("artifacts") or {}
+        report = route_task(
+            "Write an executive ROI summary for the client",
+            payload={
+                "client_name": "Demo Nonprofit",
+                "metrics": {
+                    "auto_merge_count": fuzzy_arts.get("auto_merge_count", 0),
+                    "review_count": fuzzy_arts.get("review_count", 0),
+                    "merged_count": rpa_arts.get("merged_count", 0),
+                    "corporate_links": 135,
+                    "family_links": 804,
+                    "normalized_rows": (mapped.get("result") or {})
+                    .get("artifacts", {})
+                    .get("row_count", 0),
+                    "findings_before": 20,
+                    "findings_after": 13,
+                },
+                "output_dir": str(out_root / "executive_report"),
+            },
+        )
+        print(json.dumps({"step": "executive_report", "result": report}, indent=2, default=str))
+        # 6) Unknown capability → recommend_build
+        missing = route_task(
+            "Translate donor gratitude letters into Latin and engrave them on NFT certificates",
+            execute=False,
+        )
+        print(json.dumps({"step": "recommend_build_demo", "result": missing}, indent=2, default=str))
+    elif args.agent:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             print("ANTHROPIC_API_KEY is required for --agent mode.", file=sys.stderr)
             sys.exit(1)
