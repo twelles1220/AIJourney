@@ -42,25 +42,26 @@ SELECTORS: dict[str, Any] = {
     "merge_birth_mother": {
         "text": "Merge Birth Mother",
     },
-    # From live screenshot of "Merge Entities" modal:
-    # label is "Merge To:" (paste master Birth Mother ID here)
+    # From successful live run:
+    # iframe https://.../SAM/Cmn/Ent_Merge.aspx?enttpid=28&entid={duplicate}
+    # input name/id: ctrlMergeToEntID  (label text "Merge To")
     "master_id_input": {
         "label": "Merge To",
+        "input_id": "ctrlMergeToEntID",
     },
     "save_button": {
-        "role": "button",
-        "name": "Save",
+        "text": "Save",
     },
-    # May appear after Save — keep as optional confirm
+    # After Save, SAM showed a simple "Yes" confirm (not the long Loom phrase)
     "confirm_merge_button": {
-        "role": "button",
-        "name": "Yes, merge these records",
+        "text": "Yes",
     },
 }
 
 # Profile URL pattern observed in inspect:
 # https://spencechapin.mysamdb.com/SAM/Ch/Ch_M_Vw.aspx?chmid=7172
 PROFILE_PATH_TEMPLATE = "/SAM/Ch/Ch_M_Vw.aspx?chmid={chmid}"
+MERGE_IFRAME_PATH_TEMPLATE = "/SAM/Cmn/Ent_Merge.aspx?enttpid=28&entid={entid}"
 
 
 def choose_master(left: dict, right: dict) -> dict[str, Any]:

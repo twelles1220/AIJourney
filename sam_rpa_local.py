@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from agents.sam_playbook import (
+    MERGE_IFRAME_PATH_TEMPLATE,
     MERGE_STEPS,
     PROFILE_PATH_TEMPLATE,
     SELECTORS,
@@ -190,36 +191,34 @@ def _maybe_click(page, spec: dict, *, dry_run: bool, log: list[str]) -> bool:
             log.append(f"No click strategy for selector spec: {spec}")
             return False
 
-        locator.wait_for(state="attached", timeout=8000)
-        try:
-            locator.scroll_into_view_if_needed(timeout=3000)
-        except Exception:  # noqa: BLE001
-            pass
+            locator.wait_for(state="attached", timeout=4000)
+            try:
+                locator.scroll_into_view_if_needed(timeout=2000)
+            except Exception:  # noqa: BLE001
+                pass
 
-        # Normal click first
-        try:
-            locator.click(timeout=5000)
-            log.append(f"Clicked: {label}")
-            return True
-        except Exception as first_exc:  # noqa: BLE001
-            log.append(f"Normal click blocked for '{label}' ({first_exc.__class__.__name__}); trying force/JS")
+            # Normal click first
+            try:
+                locator.click(timeout=3000)
+                log.append(f"Clicked: {label}")
+                return True
+            except Exception as first_exc:  # noqa: BLE001
+                log.append(f"Normal click blocked for '{label}' ({first_exc.__class__.__name__}); trying force")
 
-        # SAM sidebars often report "outside of the viewport" — force first.
-        # Avoid JS click for app links: it can skip ASP.NET/Bootstrap handlers.
-        try:
-            locator.click(timeout=5000, force=True)
-            log.append(f"Clicked (force): {label}")
-            return True
-        except Exception as force_exc:  # noqa: BLE001
-            log.append(f"Force click failed for '{label}': {force_exc.__class__.__name__}")
+            try:
+                locator.click(timeout=3000, force=True)
+                log.append(f"Clicked (force): {label}")
+                return True
+            except Exception as force_exc:  # noqa: BLE001
+                log.append(f"Force click failed for '{label}': {force_exc.__class__.__name__}")
 
-        try:
-            locator.dispatch_event("click")
-            log.append(f"Clicked (dispatch): {label}")
-            return True
-        except Exception as disp_exc:  # noqa: BLE001
-            log.append(f"Click failed for '{label}': {disp_exc}")
-            return False
+            try:
+                locator.dispatch_event("click")
+                log.append(f"Clicked (dispatch): {label}")
+                return True
+            except Exception as disp_exc:  # noqa: BLE001
+                log.append(f"Click failed for '{label}': {disp_exc}")
+                return False
     except Exception as exc:  # noqa: BLE001
         # Last-chance plain text
         try:
@@ -331,6 +330,16 @@ def _maybe_fill(page, spec: dict, value: str, *, dry_run: bool, log: list[str]) 
 
     root = _modal_root(page)
     try:
+        # Fast path from successful live run
+        if spec.get("input_id"):
+            try:
+                root.locator(f"#{spec['input_id']}, input[name='{spec['input_id']}']").first.fill(
+                    value, timeout=3000
+                )
+                log.append(f"Filled #{spec['input_id']} with {value}")
+                return True
+            except Exception:  # noqa: BLE001
+                pass
         if "label" in spec:
             try:
                 root.get_by_label(re.compile(re.escape(spec["label"]), re.I)).first.fill(
@@ -473,45 +482,27 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
             except Exception:  # noqa: BLE001
                 log.append("Merge Birth Mother not visible yet; will still attempt click")
 
-    # Prefer navigating directly via the Merge Birth Mother href if present
+    # Prefer opening merge iframe the way SAM does:
+    # javascript:GoAddEntIframe('/SAM/Cmn/Ent_Merge.aspx?enttpid=28&entid=7172');
     merge_opened = False
     if not dry_run:
         try:
-            merge_link = active.get_by_role(
-                "link", name=re.compile(r"Merge\s+Birth\s+Mother", re.I)
-            ).first
-            href = merge_link.get_attribute("href") or ""
-            log.append(f"Merge Birth Mother href={href!r}")
-            if href and not href.startswith("#"):
-                from urllib.parse import urlsplit, urljoin
-
-                target = urljoin(active.url, href)
-                log.append(f"Navigating directly to merge form: {target}")
-                # Capture popup if SAM opens one
-                try:
-                    with active.expect_popup(timeout=3000) as popup_info:
-                        merge_link.click(force=True)
-                    active = popup_info.value
-                    log.append(f"Merge opened popup: {active.url}")
-                    merge_opened = True
-                except Exception:  # noqa: BLE001
-                    active.goto(target, wait_until="domcontentloaded")
-                    active.wait_for_timeout(1500)
-                    log.append(f"Merge form URL now: {active.url}")
-                    merge_opened = True
-            else:
-                # Same-page modal trigger — use force click (not JS) so SAM handlers fire
-                merge_link.click(force=True, timeout=8000)
-                log.append("Clicked (force): Merge Birth Mother")
-                merge_opened = True
-                ok = True
+            merge_path = MERGE_IFRAME_PATH_TEMPLATE.format(entid=dup_id)
+            log.append(f"Opening merge iframe via GoAddEntIframe({merge_path})")
+            active.evaluate(
+                "(path) => { if (typeof GoAddEntIframe === 'function') { GoAddEntIframe(path); } }",
+                merge_path,
+            )
+            merge_opened = True
+            ok = True
         except Exception as exc:  # noqa: BLE001
-            log.append(f"Direct merge navigation failed ({exc}); falling back to click")
+            log.append(f"GoAddEntIframe failed ({exc}); falling back to menu click")
             ok = _maybe_click(active, SELECTORS["merge_birth_mother"], dry_run=False, log=log) and ok
             merge_opened = ok
     else:
-        ok = _maybe_click(active, SELECTORS["merge_birth_mother"], dry_run=True, log=log) and ok
-        merge_opened = ok
+        log.append(f"DRY-RUN would open merge iframe for entid={dup_id}")
+        ok = True
+        merge_opened = True
 
     if not dry_run and merge_opened:
         merge_ctx, note = find_merge_frame(active, timeout_ms=12000)
@@ -576,22 +567,21 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
                 log.append(f"Save click failed: {exc}")
         ok = save_ok and ok
 
-        active.wait_for_timeout(1000)
-        # Optional second confirm dialog from Loom ("Yes, merge these records")
+        active.wait_for_timeout(800)
+        # Optional confirm — successful run needed a simple "Yes"
         confirm_ok = _maybe_click(
             active, SELECTORS["confirm_merge_button"], dry_run=False, log=log
         )
         if not confirm_ok:
-            # Try common confirm labels; absence is OK if SAM merges on Save alone
-            for name in ("Yes", "OK", "Confirm", "Yes, merge these records"):
+            for name in ("Yes", "OK", "Confirm"):
                 if _maybe_click(active, {"text": name}, dry_run=False, log=log):
                     confirm_ok = True
                     break
             if not confirm_ok:
                 log.append("No secondary confirm dialog found (may be fine if Save completed merge)")
 
-        log.append("Waiting briefly for SAM (known to be slow)...")
-        active.wait_for_timeout(5000)
+        log.append("Waiting briefly for SAM...")
+        active.wait_for_timeout(2500)
         status = "merged_attempted" if ok else "failed_selectors"
 
     return {
