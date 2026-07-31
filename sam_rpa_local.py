@@ -36,7 +36,22 @@ def utc_now() -> str:
 
 
 def load_queue(path: Path) -> list[dict]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    raw = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        line = exc.lineno or 1
+        col = exc.colno or 1
+        lines = raw.splitlines()
+        snippet = lines[line - 1] if 0 < line <= len(lines) else ""
+        marker = " " * max(col - 1, 0) + "^"
+        raise SystemExit(
+            f"Invalid JSON in {path} at line {line} column {col}: {exc.msg}\n"
+            f"  {snippet}\n"
+            f"  {marker}\n"
+            "Fix: use straight quotes, no line breaks inside names, "
+            "and no trailing commas. Or paste the file contents for a fix."
+        ) from exc
     if isinstance(data, list):
         return data
     if isinstance(data, dict) and "items" in data:

@@ -61,6 +61,20 @@ class SamPlaybookTests(unittest.TestCase):
         self.assertEqual(normalized["master"]["birth_mother_id"], "803")
         self.assertIsNone(should_skip_item(normalized))
 
+    def test_load_queue_reports_control_character(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.json"
+            # Literal newline inside a JSON string → Invalid control character
+            path.write_text(
+                '{\n  "items": [{\n    "id": "pair-004",\n'
+                '    "master": {"full_name": "Bad\nName"}\n  }]\n}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                load_queue(path)
+            self.assertIn("Invalid JSON", str(ctx.exception))
+            self.assertIn("line", str(ctx.exception))
+
     def test_save_confirm_js_is_nonblocking(self):
         # Guardrail: Save/Yes must be scheduled via setTimeout so CDP cannot hang
         # on a synchronous window.confirm() inside evaluate().
