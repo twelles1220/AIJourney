@@ -300,6 +300,8 @@ Watch for the script trying to:
 - [ ] Click **Save**
 - [ ] Confirm **Yes, merge these records**
 
+If PowerShell prints `If Yes/No is still visible in Chrome, click YES now`, do that in Chrome. The runner waits up to 90 seconds for the merge window to close instead of hanging on a Playwright click.
+
 ### 5.4 Verify in SAM (manual confirmation)
 After the script finishes:
 
@@ -309,6 +311,7 @@ After the script finishes:
 
 ### 5.5 If something looks wrong
 - [ ] Stop immediately (do not raise `--limit`)
+- [ ] If Yes/No is stuck on screen: click **Yes** yourself, wait for the script timeout or Ctrl+C, then `git pull` and re-run `--limit 1`
 - [ ] Note which button/label failed
 - [ ] Tell me the exact on-screen button text so we can update selectors in `agents/sam_playbook.py`
 

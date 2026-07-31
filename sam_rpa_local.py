@@ -16,6 +16,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -434,6 +435,289 @@ def open_profile(page, chmid: str, *, dry_run: bool, log: list[str]):
     return True
 
 
+# Patch confirm/alert on this window + reachable child frames.
+# Used so Save never blocks the Playwright CDP call on a native confirm().
+_CONFIRM_PATCH_JS = """
+() => {
+  const patch = (w) => {
+    try {
+      w.__samConfirmPatched = true;
+      w.confirm = (msg) => { w.__samLastConfirm = String(msg || ''); return true; };
+      w.alert = (msg) => { w.__samLastAlert = String(msg || ''); };
+      w.prompt = () => null;
+    } catch (e) {}
+  };
+  patch(window);
+  try { patch(window.top); } catch (e) {}
+  try {
+    for (let i = 0; i < window.frames.length; i++) {
+      try { patch(window.frames[i]); } catch (e) {}
+    }
+  } catch (e) {}
+  return true;
+}
+"""
+
+# Patch confirm in the same tick, then schedule Save via setTimeout so evaluate
+# returns BEFORE any synchronous confirm() can freeze the CDP session.
+_SAVE_SCHEDULE_JS = """
+() => {
+  const patch = (w) => {
+    try {
+      w.__samConfirmPatched = true;
+      w.confirm = (msg) => { w.__samLastConfirm = String(msg || ''); return true; };
+      w.alert = (msg) => { w.__samLastAlert = String(msg || ''); };
+      w.prompt = () => null;
+    } catch (e) {}
+  };
+  patch(window);
+  try { patch(window.top); } catch (e) {}
+  try {
+    for (let i = 0; i < window.frames.length; i++) {
+      try { patch(window.frames[i]); } catch (e) {}
+    }
+  } catch (e) {}
+
+  const nodes = Array.from(
+    document.querySelectorAll('a, button, input[type=button], input[type=submit]')
+  );
+  const btn = nodes.find((el) =>
+    /\\bsave\\b/i.test((el.innerText || el.value || '').replace(/\\s+/g, ' ').trim())
+  );
+  if (!btn) return { ok: false, reason: 'no-save' };
+  const text = (btn.innerText || btn.value || '').replace(/\\s+/g, ' ').trim().slice(0, 60);
+  setTimeout(() => { try { btn.click(); } catch (e) {} }, 0);
+  return { ok: true, reason: 'scheduled', text };
+}
+"""
+
+_YES_SCHEDULE_JS = """
+() => {
+  const patterns = [/yes,?\\s*merge/i, /^yes$/i, /^ok$/i, /^confirm$/i];
+  const nodes = Array.from(
+    document.querySelectorAll(
+      'a, button, input[type=button], input[type=submit], [role=button]'
+    )
+  );
+  for (const el of nodes) {
+    const text = (el.innerText || el.value || el.getAttribute('aria-label') || '')
+      .replace(/\\s+/g, ' ')
+      .trim();
+    if (!text || !patterns.some((p) => p.test(text))) continue;
+    try {
+      const style = window.getComputedStyle(el);
+      if (style && (style.visibility === 'hidden' || style.display === 'none')) continue;
+    } catch (e) {}
+    setTimeout(() => { try { el.click(); } catch (e) {} }, 0);
+    return { ok: true, text: text.slice(0, 80) };
+  }
+  return { ok: false };
+}
+"""
+
+_MERGE_UI_OPEN_JS = """
+() => {
+  const el = document.getElementById('ctrlMergeToEntID');
+  if (el) {
+    try {
+      if (el.offsetParent !== null) return true;
+    } catch (e) {
+      return true;
+    }
+  }
+  const t = ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ');
+  return /Merge Entities/i.test(t) && /Merge To/i.test(t);
+}
+"""
+
+
+def _iter_page_frames(host_page):
+    yield host_page
+    try:
+        yield from host_page.frames
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _patch_confirm_everywhere(host_page, merge_ctx, log: list[str]) -> None:
+    seen: set[int] = set()
+    for ctx in (merge_ctx, *_iter_page_frames(host_page)):
+        try:
+            key = id(ctx)
+            if key in seen:
+                continue
+            seen.add(key)
+            ctx.evaluate(_CONFIRM_PATCH_JS)
+            log.append(f"Patched confirm/alert on frame url={getattr(ctx, 'url', '')[:120]}")
+        except Exception as exc:  # noqa: BLE001
+            log.append(f"Confirm patch skipped ({exc.__class__.__name__})")
+
+
+def _schedule_save_click(merge_ctx, log: list[str]) -> bool:
+    """Click Save without blocking on native confirm(). Never use locator.click() here."""
+    try:
+        result = merge_ctx.evaluate(_SAVE_SCHEDULE_JS)
+    except Exception as exc:  # noqa: BLE001
+        log.append(f"Scheduled Save failed: {exc}")
+        return False
+    if isinstance(result, dict) and result.get("ok"):
+        log.append(f"Scheduled Save click ({result.get('text')!r}) after confirm patch")
+        return True
+    log.append(f"Could not find Save control to schedule: {result!r}")
+    return False
+
+
+def _schedule_yes_clicks(host_page, log: list[str]) -> bool:
+    """Click on-page Yes/OK via JS setTimeout (never Playwright locator.click)."""
+    clicked = False
+    for ctx in _iter_page_frames(host_page):
+        try:
+            result = ctx.evaluate(_YES_SCHEDULE_JS)
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(result, dict) and result.get("ok"):
+            log.append(f"Scheduled Yes/confirm click ({result.get('text')!r})")
+            clicked = True
+    return clicked
+
+
+def _merge_ui_still_open(host_page) -> bool:
+    for ctx in _iter_page_frames(host_page):
+        try:
+            if ctx.evaluate(_MERGE_UI_OPEN_JS):
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def _finish_save_and_confirm(host_page, merge_ctx, log: list[str]) -> bool:
+    """
+    Save + confirm without hanging PowerShell.
+
+    Native window.confirm() blocks Playwright CDP calls until dismissed. We:
+      1) patch confirm() on every reachable frame
+      2) schedule Save via setTimeout (evaluate returns immediately)
+      3) accept Playwright dialog events on the browser context
+      4) schedule on-page Yes clicks via JS (no locator.click)
+      5) if UI still open, ask the operator to click Yes and wait for close
+    """
+    dialogs: list[str] = []
+
+    def _accept_dialog(dialog) -> None:
+        msg = (dialog.message or "").replace("\n", " ")[:180]
+        dialogs.append(f"{dialog.type}:{msg}")
+        try:
+            dialog.accept()
+        except Exception:  # noqa: BLE001
+            pass
+
+    context = getattr(host_page, "context", None)
+    if context is not None:
+        context.on("dialog", _accept_dialog)
+    host_page.on("dialog", _accept_dialog)
+
+    try:
+        _patch_confirm_everywhere(host_page, merge_ctx, log)
+        save_ok = _schedule_save_click(merge_ctx, log)
+        if not save_ok:
+            # Last resort: still avoid sync locator.click — try host page too
+            save_ok = _schedule_save_click(host_page, log)
+
+        # Let the scheduled Save run; confirm patch / dialog handler should absorb it.
+        host_page.wait_for_timeout(400)
+
+        confirmed = False
+        try:
+            last_confirm = merge_ctx.evaluate("() => window.__samLastConfirm || null")
+            if last_confirm:
+                log.append(f"window.confirm was auto-accepted: {str(last_confirm)[:180]}")
+                confirmed = True
+        except Exception:  # noqa: BLE001
+            pass
+
+        if dialogs:
+            for d in dialogs:
+                log.append(f"Accepted JS dialog → {d}")
+            confirmed = True
+
+        # On-page Yes/No (HTML), not native confirm
+        for attempt in range(10):
+            if _schedule_yes_clicks(host_page, log):
+                confirmed = True
+            if dialogs and not confirmed:
+                for d in dialogs:
+                    log.append(f"Accepted JS dialog → {d}")
+                confirmed = True
+            try:
+                if not _merge_ui_still_open(host_page):
+                    log.append("Merge UI closed after Save/confirm")
+                    return save_ok
+            except Exception:  # noqa: BLE001
+                # If CDP is wedged by a native dialog, fall through to manual wait.
+                pass
+            # Enter often activates the default Yes on SAM prompts
+            try:
+                host_page.keyboard.press("Enter")
+            except Exception:  # noqa: BLE001
+                pass
+            host_page.wait_for_timeout(400)
+
+        if confirmed:
+            log.append("Confirm signal seen; waiting for merge UI to settle")
+        else:
+            log.append("No auto-confirm signal yet — checking for manual Yes/No")
+
+        print(
+            "\n>>> If Yes/No is still visible in Chrome, click YES now.\n"
+            ">>> Waiting up to 90s for the merge window to close...\n",
+            flush=True,
+        )
+        log.append("Manual fallback: waiting for operator Yes or merge UI close (90s)")
+
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            if dialogs:
+                for d in dialogs:
+                    log.append(f"Accepted JS dialog → {d}")
+                dialogs.clear()
+                confirmed = True
+            try:
+                _schedule_yes_clicks(host_page, log)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if not _merge_ui_still_open(host_page):
+                    log.append("Merge UI closed (merge likely committed)")
+                    return save_ok
+            except Exception:  # noqa: BLE001
+                # Native dialog can block evaluate; keep waiting for operator click.
+                pass
+            try:
+                host_page.keyboard.press("Enter")
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                host_page.wait_for_timeout(500)
+            except Exception:  # noqa: BLE001
+                time.sleep(0.5)
+
+        dump_visible_controls(host_page, log)
+        log.append(
+            "Merge UI still open after timeout — click Yes in Chrome if visible, "
+            "then re-run this queue item."
+        )
+        return False
+    finally:
+        for target in (host_page, context):
+            if target is None:
+                continue
+            try:
+                target.remove_listener("dialog", _accept_dialog)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = None) -> dict[str, Any]:
     log: list[str] = []
     master = item.get("master") or {}
@@ -546,153 +830,16 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
         log.append("DRY-RUN stop point: would Save + confirm merge next")
         status = "dry_run_ok" if ok else "dry_run_selector_issues"
     else:
-        # Dialogs fire on the Page, not the iframe Frame
+        # Dialogs / confirm must not block CDP. Use async Save + JS Yes only.
         host_page = active.page if hasattr(active, "page") else active
-        dialogs: list[str] = []
-
-        def _accept_dialog(dialog) -> None:
-            msg = (dialog.message or "").replace("\n", " ")[:180]
-            dialogs.append(f"{dialog.type}:{msg}")
-            dialog.accept()
-
-        host_page.on("dialog", _accept_dialog)
+        confirmed_ok = _finish_save_and_confirm(host_page, active, log)
+        ok = confirmed_ok and ok
+        log.append("Waiting for SAM to finish merge...")
         try:
-            # CDP-attached Chrome sometimes mishandles native dialogs.
-            # Force confirm()/alert() to auto-accept in this page + merge frame.
-            for ctx in (host_page, active):
-                try:
-                    ctx.evaluate(
-                        """
-                        () => {
-                          window.__samConfirmPatched = true;
-                          window.confirm = (msg) => { window.__samLastConfirm = String(msg||''); return true; };
-                          window.alert = (msg) => { window.__samLastAlert = String(msg||''); };
-                        }
-                        """
-                    )
-                    log.append("Patched window.confirm/alert to auto-accept")
-                except Exception as exc:  # noqa: BLE001
-                    log.append(f"Could not patch confirm on context: {exc.__class__.__name__}")
-            save_locators = [
-                active.locator("a").filter(has_text=re.compile(r"Save", re.I)).first,
-                active.get_by_role("link", name=re.compile(r"Save", re.I)).first,
-                active.get_by_text(re.compile(r"Save", re.I)).first,
-                active.locator("#btnSave, input[value*='Save'], button:has-text('Save')").first,
-            ]
-            for loc in save_locators:
-                try:
-                    loc.scroll_into_view_if_needed(timeout=2000)
-                except Exception:  # noqa: BLE001
-                    pass
-                for mode in ("normal", "force", "js"):
-                    try:
-                        if mode == "normal":
-                            loc.click(timeout=3000)
-                        elif mode == "force":
-                            loc.click(timeout=3000, force=True)
-                        else:
-                            loc.evaluate("el => el.click()")
-                        log.append(f"Clicked Save in merge iframe ({mode})")
-                        save_ok = True
-                        break
-                    except Exception:  # noqa: BLE001
-                        continue
-                if save_ok:
-                    break
-            if not save_ok:
-                try:
-                    clicked = active.evaluate(
-                        """
-                        () => {
-                          const anchors = Array.from(document.querySelectorAll('a, input[type=submit], button'));
-                          for (const el of anchors) {
-                            const text = (el.innerText || el.value || '').trim();
-                            if (/save/i.test(text)) { el.click(); return text; }
-                          }
-                          return null;
-                        }
-                        """
-                    )
-                    if clicked:
-                        log.append(f"Clicked Save via DOM scan ({clicked!r})")
-                        save_ok = True
-                    else:
-                        log.append("Could not click Save link in merge iframe")
-                except Exception as exc:  # noqa: BLE001
-                    log.append(f"Could not click Save link in merge iframe: {exc}")
-            ok = save_ok and ok
-
-            # If confirm() was patched, read what message would have been shown
-            try:
-                last_confirm = active.evaluate("() => window.__samLastConfirm || null")
-                if last_confirm:
-                    log.append(f"window.confirm was auto-accepted: {str(last_confirm)[:180]}")
-                    confirmed = True
-                else:
-                    confirmed = False
-            except Exception:  # noqa: BLE001
-                confirmed = False
-
-            # Also poll for HTML Yes if native confirm wasn't used
-            if not confirmed:
-                for _ in range(16):  # ~8s
-                    if dialogs:
-                        for d in dialogs:
-                            log.append(f"Accepted JS dialog → {d}")
-                        confirmed = True
-                        break
-                    contexts = [host_page]
-                    try:
-                        contexts.extend(host_page.frames)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    for ctx in contexts:
-                        for pattern in (
-                            r"Yes,\s*merge these records",
-                            r"^Yes$",
-                            r"^OK$",
-                            r"^Confirm$",
-                        ):
-                            try:
-                                ctx.get_by_role(
-                                    "button", name=re.compile(pattern, re.I)
-                                ).first.click(timeout=700, force=True)
-                                log.append(f"Clicked confirm button /{pattern}/")
-                                confirmed = True
-                                break
-                            except Exception:  # noqa: BLE001
-                                try:
-                                    ctx.locator(
-                                        "a, button, input[type=button], input[type=submit]"
-                                    ).filter(
-                                        has_text=re.compile(pattern, re.I)
-                                    ).first.click(timeout=700, force=True)
-                                    log.append(f"Clicked confirm control /{pattern}/")
-                                    confirmed = True
-                                    break
-                                except Exception:  # noqa: BLE001
-                                    continue
-                        if confirmed:
-                            break
-                    if confirmed:
-                        break
-                    host_page.wait_for_timeout(500)
-
-            if not confirmed:
-                dump_visible_controls(host_page, log)
-                log.append(
-                    "No confirm detected after Save — "
-                    "if Yes is visible, is it a browser popup or an on-page button?"
-                )
-
-            log.append("Waiting for SAM to finish merge...")
-            host_page.wait_for_timeout(3000)
-            status = "merged_attempted" if ok else "failed_selectors"
-        finally:
-            try:
-                host_page.remove_listener("dialog", _accept_dialog)
-            except Exception:  # noqa: BLE001
-                pass
+            host_page.wait_for_timeout(1500)
+        except Exception:  # noqa: BLE001
+            pass
+        status = "merged_attempted" if ok else "failed_selectors"
 
     return {
         "id": item.get("id"),

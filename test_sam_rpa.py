@@ -8,7 +8,12 @@ import unittest
 from pathlib import Path
 
 from agents.sam_playbook import choose_master, should_skip_item
-from sam_rpa_local import load_queue, normalize_item
+from sam_rpa_local import (
+    _SAVE_SCHEDULE_JS,
+    _YES_SCHEDULE_JS,
+    load_queue,
+    normalize_item,
+)
 
 
 class SamPlaybookTests(unittest.TestCase):
@@ -54,6 +59,13 @@ class SamPlaybookTests(unittest.TestCase):
         normalized = normalize_item(items[0])
         self.assertEqual(normalized["master"]["birth_mother_id"], "803")
         self.assertIsNone(should_skip_item(normalized))
+
+    def test_save_confirm_js_is_nonblocking(self):
+        # Guardrail: Save/Yes must be scheduled via setTimeout so CDP cannot hang
+        # on a synchronous window.confirm() inside evaluate().
+        self.assertIn("setTimeout", _SAVE_SCHEDULE_JS)
+        self.assertIn("confirm", _SAVE_SCHEDULE_JS)
+        self.assertIn("setTimeout", _YES_SCHEDULE_JS)
 
 
 if __name__ == "__main__":
