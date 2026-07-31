@@ -221,7 +221,27 @@ def _maybe_click(page, spec: dict, *, dry_run: bool, log: list[str]) -> bool:
             return False
 
 
-def _maybe_fill(page, spec: dict, value: str, *, dry_run: bool, log: list[str]) -> bool:
+def _maybe_fill_fallback(page, spec: dict, value: str, *, log: list[str]) -> bool:
+    """Try alternate ways to find the merge ID field when label lookup fails."""
+    try:
+        if "placeholder" in spec:
+            loc = page.get_by_placeholder(re.compile(spec["placeholder"], re.I)).first
+            loc.fill(value, timeout=4000)
+            log.append(f"Filled via placeholder '{spec['placeholder']}' with {value}")
+            return True
+        if "name_contains" in spec:
+            loc = page.locator(f"input[name*='{spec['name_contains']}'], input[id*='{spec['name_contains']}']").first
+            loc.fill(value, timeout=4000)
+            log.append(f"Filled via name/id containing '{spec['name_contains']}' with {value}")
+            return True
+        if "label" in spec:
+            loc = page.get_by_label(re.compile(re.escape(spec["label"]), re.I)).first
+            loc.fill(value, timeout=4000)
+            log.append(f"Filled via label '{spec['label']}' with {value}")
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.append(f"Fallback fill missed ({spec}): {exc.__class__.__name__}")
+    return False
     label = spec.get("label") or spec.get("name") or "input"
     if dry_run:
         log.append(f"DRY-RUN would paste Birth Mother ID '{value}' into: {label}")
@@ -243,6 +263,47 @@ def _maybe_fill(page, spec: dict, value: str, *, dry_run: bool, log: list[str]) 
     except Exception as exc:  # noqa: BLE001
         log.append(f"Fill failed for '{label}': {exc}")
         return False
+
+
+def dump_visible_controls(page, log: list[str], *, limit: int = 40) -> None:
+    """Append a quick snapshot of buttons/links/inputs to the run log."""
+    try:
+        buttons = []
+        for b in page.get_by_role("button").all()[:limit]:
+            try:
+                t = (b.inner_text(timeout=500) or "").strip()
+                if t:
+                    buttons.append(t[:80])
+            except Exception:  # noqa: BLE001
+                continue
+        links = []
+        for a in page.get_by_role("link").all()[:limit]:
+            try:
+                t = (a.inner_text(timeout=500) or "").strip()
+                if t:
+                    links.append(t[:80])
+            except Exception:  # noqa: BLE001
+                continue
+        inputs = []
+        for el in page.locator("input, select, textarea").all()[:limit]:
+            try:
+                inputs.append(
+                    {
+                        "type": el.get_attribute("type"),
+                        "name": el.get_attribute("name"),
+                        "id": el.get_attribute("id"),
+                        "placeholder": el.get_attribute("placeholder"),
+                        "aria_label": el.get_attribute("aria-label"),
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                continue
+        log.append(f"SNAPSHOT url={page.url}")
+        log.append(f"SNAPSHOT buttons={buttons}")
+        log.append(f"SNAPSHOT links={links[:25]}")
+        log.append(f"SNAPSHOT inputs={inputs}")
+    except Exception as exc:  # noqa: BLE001
+        log.append(f"SNAPSHOT failed: {exc}")
 
 
 def find_profile_page(pages, chmid: str):
@@ -313,7 +374,37 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
     ok = _maybe_click(active, SELECTORS["merge_birth_mother"], dry_run=dry_run, log=log) and ok
     if not dry_run:
         active.wait_for_timeout(1500)
-    ok = _maybe_fill(active, SELECTORS["master_id_input"], master_id, dry_run=dry_run, log=log) and ok
+        # If Merge opened another tab, switch to the newest one
+        if all_pages is not None:
+            try:
+                context = active.context
+                refreshed = context.pages
+                if refreshed and refreshed[-1] is not active:
+                    active = refreshed[-1]
+                    log.append(f"Switched to newest tab after Merge click: {active.url}")
+                    active.wait_for_timeout(1000)
+            except Exception as exc:  # noqa: BLE001
+                log.append(f"Could not check for new merge tab: {exc}")
+        dump_visible_controls(active, log)
+    filled = _maybe_fill(active, SELECTORS["master_id_input"], master_id, dry_run=dry_run, log=log)
+    if not filled and not dry_run:
+        # Try common SAM-ish field fallbacks
+        for fallback in (
+            {"placeholder": "Birth Mother"},
+            {"name_contains": "chmid"},
+            {"name_contains": "merge"},
+            {"label": "Mother ID"},
+            {"label": "Merge into"},
+        ):
+            if _maybe_fill_fallback(active, fallback, master_id, log=log):
+                filled = True
+                break
+        if not filled:
+            dump_visible_controls(active, log)
+            log.append(
+                "Fill still failing. On the merge screen, run: python sam_rpa_local.py --inspect"
+            )
+    ok = filled and ok
 
     if dry_run:
         log.append("DRY-RUN stop point: would Save + confirm merge next")
