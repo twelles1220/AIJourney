@@ -147,6 +147,56 @@ class SamPlaybookTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(captured, ["pair-003"])
 
+    def test_offset_and_limit_slice_queue(self):
+        from unittest.mock import MagicMock, patch
+
+        queue = {
+            "items": [
+                {
+                    "id": f"pair-{i:03d}",
+                    "decision": "approved",
+                    "match_reason": "name",
+                    "master": {"birth_mother_id": str(i)},
+                    "duplicate": {"birth_mother_id": str(1000 + i)},
+                }
+                for i in range(1, 6)
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "q.json"
+            path.write_text(json.dumps(queue), encoding="utf-8")
+            captured: list[str] = []
+
+            def fake_run(page, item, *, dry_run, all_pages=None):
+                captured.append(item["id"])
+                return {"id": item["id"], "status": "dry_run_ok", "ok": True, "log": []}
+
+            fake_page = MagicMock()
+            fake_page.url = "https://example.test/SAM/Ch/Ch_M_Vw.aspx?chmid=1"
+            fake_context = MagicMock()
+            fake_context.pages = [fake_page]
+            fake_browser = MagicMock()
+            fake_browser.contexts = [fake_context]
+
+            with patch("sam_rpa_local.connect_browser", return_value=(MagicMock(), fake_browser)):
+                with patch("sam_rpa_local.run_one_merge", side_effect=fake_run):
+                    with patch("sam_rpa_local.pick_live_page", return_value=fake_page):
+                        rc = main(
+                            [
+                                "--queue",
+                                str(path),
+                                "--dry-run",
+                                "--offset",
+                                "2",
+                                "--limit",
+                                "2",
+                                "--output-dir",
+                                str(Path(tmp) / "out"),
+                            ]
+                        )
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured, ["pair-003", "pair-004"])
+
 
 if __name__ == "__main__":
     unittest.main()

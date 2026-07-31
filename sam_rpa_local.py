@@ -998,6 +998,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--limit", type=int, default=0, help="Max items to process (0 = all)")
     parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Skip the first N queue items before applying --limit (e.g. --offset 10 --limit 10)",
+    )
+    parser.add_argument(
         "--id",
         action="append",
         default=[],
@@ -1043,10 +1049,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Queue id(s) not found: {', '.join(missing)}", file=sys.stderr)
                 return 2
             items = matched
+        if args.offset and args.offset > 0:
+            items = items[args.offset :]
         if args.limit and args.limit > 0:
             items = items[: args.limit]
 
         print(f"Loaded {len(items)} queue item(s) from {queue_path}")
+        if args.offset:
+            print(f"Offset: skipped first {args.offset} queue item(s)")
         if args.item_ids:
             print(f"Filtered to id(s): {', '.join(args.item_ids)}")
         print(f"Mode: {'DRY-RUN' if args.dry_run else 'LIVE'}")
