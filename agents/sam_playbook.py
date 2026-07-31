@@ -23,7 +23,7 @@ MERGE_STEPS = [
     "Refresh and verify the duplicate no longer appears on the alert list",
 ]
 
-# Best-effort selectors — tune these against real SAM screens.
+# Best-effort selectors — tuned from live --inspect on Spence Chapin SAM.
 # Prefer get_by_role / get_by_label text from your UI when possible.
 SELECTORS: dict[str, Any] = {
     "duplicate_records_alert_link": {
@@ -34,9 +34,10 @@ SELECTORS: dict[str, Any] = {
         "role": "link",
         "name": "Duplicate Record",
     },
+    # Inspect showed this as a LINK named "ADVANCED OPTIONS" (all caps)
     "advanced_options": {
-        "role": "button",
-        "name": "Advanced Options",
+        "role": "link",
+        "name": "ADVANCED OPTIONS",
     },
     "merge_birth_mother": {
         "role": "link",
@@ -55,6 +56,10 @@ SELECTORS: dict[str, Any] = {
         "name": "Yes, merge these records",
     },
 }
+
+# Profile URL pattern observed in inspect:
+# https://spencechapin.mysamdb.com/SAM/Ch/Ch_M_Vw.aspx?chmid=7172
+PROFILE_PATH_TEMPLATE = "/SAM/Ch/Ch_M_Vw.aspx?chmid={chmid}"
 
 
 def choose_master(left: dict, right: dict) -> dict[str, Any]:

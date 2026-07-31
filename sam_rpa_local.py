@@ -20,7 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agents.sam_playbook import MERGE_STEPS, SELECTORS, choose_master, should_skip_item
+from agents.sam_playbook import (
+    MERGE_STEPS,
+    PROFILE_PATH_TEMPLATE,
+    SELECTORS,
+    choose_master,
+    should_skip_item,
+)
 
 
 def utc_now() -> str:
@@ -209,7 +215,34 @@ def _maybe_fill(page, spec: dict, value: str, *, dry_run: bool, log: list[str]) 
         return False
 
 
-def run_one_merge(page, item: dict, *, dry_run: bool) -> dict[str, Any]:
+def find_profile_page(pages, chmid: str):
+    """Return an open tab whose URL contains chmid=..., else None."""
+    needle = f"chmid={chmid}"
+    for page in pages:
+        if needle in (page.url or ""):
+            return page
+    return None
+
+
+def open_profile(page, chmid: str, *, dry_run: bool, log: list[str]):
+    """Navigate current page to the birth-mother cover page for chmid."""
+    # Keep same origin; only swap path/query
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(page.url)
+    path = PROFILE_PATH_TEMPLATE.format(chmid=chmid)
+    target = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    if dry_run:
+        log.append(f"DRY-RUN would open profile: {target}")
+        return True
+    log.append(f"Opening profile: {target}")
+    page.goto(target, wait_until="domcontentloaded")
+    page.wait_for_timeout(1500)
+    log.append(f"Opened profile URL now: {page.url}")
+    return True
+
+
+def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = None) -> dict[str, Any]:
     log: list[str] = []
     master = item.get("master") or {}
     duplicate = item.get("duplicate") or {}
@@ -218,41 +251,40 @@ def run_one_merge(page, item: dict, *, dry_run: bool) -> dict[str, Any]:
 
     log.append(f"Item {item.get('id')}: master={master_id} duplicate={dup_id}")
     log.append(f"Master reason: {item.get('master_reason') or 'provided_in_queue'}")
-    log.append(f"Current page URL: {page.url}")
     for step in MERGE_STEPS:
         log.append(f"PLAN: {step}")
 
-    # IMPORTANT: Advanced Options lives on the birth-mother *profile* page,
-    # not on the duplicate report grid. For now we require you to open the
-    # duplicate profile tab first, then we attempt the merge controls.
-    if "Rpt.aspx" in (page.url or ""):
-        log.append(
-            "NOTE: You are on the report grid page. Open the duplicate profile "
-            f"(Birth Mother ID {dup_id}) first, then re-run. Use --inspect on that tab."
-        )
-        if not dry_run:
-            return {
-                "id": item.get("id"),
-                "status": "need_profile_page",
-                "master_birth_mother_id": master_id,
-                "duplicate_birth_mother_id": dup_id,
-                "log": log,
-                "ok": False,
-            }
+    # Prefer an already-open duplicate profile tab; otherwise navigate there.
+    active = page
+    if all_pages:
+        existing = find_profile_page(all_pages, dup_id)
+        if existing is not None:
+            active = existing
+            log.append(f"Using already-open duplicate tab: {active.url}")
+        else:
+            open_profile(active, dup_id, dry_run=dry_run, log=log)
+    elif "chmid=" not in (active.url or ""):
+        open_profile(active, dup_id, dry_run=dry_run, log=log)
+
+    log.append(f"Working page URL: {active.url}")
 
     ok = True
-    ok = _maybe_click(page, SELECTORS["advanced_options"], dry_run=dry_run, log=log) and ok
-    ok = _maybe_click(page, SELECTORS["merge_birth_mother"], dry_run=dry_run, log=log) and ok
-    ok = _maybe_fill(page, SELECTORS["master_id_input"], master_id, dry_run=dry_run, log=log) and ok
+    ok = _maybe_click(active, SELECTORS["advanced_options"], dry_run=dry_run, log=log) and ok
+    if not dry_run:
+        active.wait_for_timeout(1000)
+    ok = _maybe_click(active, SELECTORS["merge_birth_mother"], dry_run=dry_run, log=log) and ok
+    if not dry_run:
+        active.wait_for_timeout(1000)
+    ok = _maybe_fill(active, SELECTORS["master_id_input"], master_id, dry_run=dry_run, log=log) and ok
 
     if dry_run:
         log.append("DRY-RUN stop point: would Save + confirm merge next")
         status = "dry_run_ok" if ok else "dry_run_selector_issues"
     else:
-        ok = _maybe_click(page, SELECTORS["save_button"], dry_run=False, log=log) and ok
-        ok = _maybe_click(page, SELECTORS["confirm_merge_button"], dry_run=False, log=log) and ok
+        ok = _maybe_click(active, SELECTORS["save_button"], dry_run=False, log=log) and ok
+        ok = _maybe_click(active, SELECTORS["confirm_merge_button"], dry_run=False, log=log) and ok
         log.append("Waiting briefly for SAM (known to be slow)...")
-        page.wait_for_timeout(5000)
+        active.wait_for_timeout(5000)
         status = "merged_attempted" if ok else "failed_selectors"
 
     return {
@@ -329,15 +361,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         context = contexts[0]
         pages = context.pages
-        # Prefer a non-report page if one is open (profile/merge tab)
         page = pages[0] if pages else context.new_page()
+        # Prefer an open profile tab if present
         for candidate in pages:
-            if "Rpt.aspx" not in (candidate.url or ""):
+            if "Ch_M_Vw.aspx" in (candidate.url or ""):
                 page = candidate
                 break
         print(f"Attached. Active page: {page.url}")
         if len(pages) > 1:
-            print(f"Note: {len(pages)} tabs open. Using: {page.url}")
+            print(f"Note: {len(pages)} tabs open.")
 
         results: list[dict] = []
         for item in items:
@@ -355,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
             print(f"Processing {item.get('id')} ...")
-            entry = run_one_merge(page, item, dry_run=args.dry_run)
+            entry = run_one_merge(page, item, dry_run=args.dry_run, all_pages=pages)
             results.append(entry)
             print(f"  → {entry['status']}")
             for line in entry["log"]:
