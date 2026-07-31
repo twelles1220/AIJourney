@@ -166,24 +166,54 @@ def _maybe_click(page, spec: dict, *, dry_run: bool, log: list[str]) -> bool:
     if dry_run:
         log.append(f"DRY-RUN would click: {label}")
         return True
+
+    locator = None
     try:
         if "role" in spec and "name" in spec:
-            page.get_by_role(spec["role"], name=re.compile(re.escape(spec["name"]), re.I)).first.click(
-                timeout=8000
-            )
+            locator = page.get_by_role(
+                spec["role"], name=re.compile(re.escape(spec["name"]), re.I)
+            ).first
         elif "label" in spec:
-            page.get_by_label(re.compile(re.escape(spec["label"]), re.I)).first.click(timeout=8000)
+            locator = page.get_by_label(re.compile(re.escape(spec["label"]), re.I)).first
         elif "text" in spec:
-            page.get_by_text(re.compile(re.escape(spec["text"]), re.I)).first.click(timeout=8000)
+            locator = page.get_by_text(re.compile(re.escape(spec["text"]), re.I)).first
         else:
             log.append(f"No click strategy for selector spec: {spec}")
             return False
-        log.append(f"Clicked: {label}")
-        return True
-    except Exception as exc:  # noqa: BLE001
-        # Fallback: plain visible text
+
+        locator.wait_for(state="attached", timeout=8000)
         try:
-            page.get_by_text(label, exact=False).first.click(timeout=5000)
+            locator.scroll_into_view_if_needed(timeout=3000)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Normal click first
+        try:
+            locator.click(timeout=5000)
+            log.append(f"Clicked: {label}")
+            return True
+        except Exception as first_exc:  # noqa: BLE001
+            log.append(f"Normal click blocked for '{label}' ({first_exc.__class__.__name__}); trying force/JS")
+
+        # SAM sidebars often report "outside of the viewport" — force + JS fallbacks
+        try:
+            locator.click(timeout=5000, force=True)
+            log.append(f"Clicked (force): {label}")
+            return True
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            locator.evaluate("el => el.click()")
+            log.append(f"Clicked (JS): {label}")
+            return True
+        except Exception as js_exc:  # noqa: BLE001
+            log.append(f"Click failed for '{label}': {js_exc}")
+            return False
+    except Exception as exc:  # noqa: BLE001
+        # Last-chance plain text
+        try:
+            page.get_by_text(label, exact=False).first.click(timeout=5000, force=True)
             log.append(f"Clicked via text fallback: {label}")
             return True
         except Exception:  # noqa: BLE001
@@ -271,10 +301,18 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
     ok = True
     ok = _maybe_click(active, SELECTORS["advanced_options"], dry_run=dry_run, log=log) and ok
     if not dry_run:
-        active.wait_for_timeout(1000)
+        # ADVANCED OPTIONS is a Bootstrap collapse; wait for menu items to appear
+        active.wait_for_timeout(1500)
+        try:
+            active.get_by_text(re.compile(r"Merge\s+Birth\s+Mother", re.I)).first.wait_for(
+                state="visible", timeout=5000
+            )
+            log.append("Merge Birth Mother became visible after ADVANCED OPTIONS")
+        except Exception:  # noqa: BLE001
+            log.append("Merge Birth Mother not visible yet; will still attempt click")
     ok = _maybe_click(active, SELECTORS["merge_birth_mother"], dry_run=dry_run, log=log) and ok
     if not dry_run:
-        active.wait_for_timeout(1000)
+        active.wait_for_timeout(1500)
     ok = _maybe_fill(active, SELECTORS["master_id_input"], master_id, dry_run=dry_run, log=log) and ok
 
     if dry_run:
