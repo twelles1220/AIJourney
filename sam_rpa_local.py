@@ -557,23 +557,60 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
 
         host_page.on("dialog", _accept_dialog)
         try:
-            # Save is a LINK in the merge iframe (from successful inspect snapshot)
+            # Save is a LINK in the merge iframe; label may include an icon/emoji (e.g. "💾 Save")
             save_ok = False
             save_locators = [
-                active.get_by_role("link", name=re.compile(r"^Save$", re.I)).first,
-                active.locator("a", has_text=re.compile(r"^Save$", re.I)).first,
-                active.get_by_text(re.compile(r"^Save$", re.I)).first,
+                active.locator("a").filter(has_text=re.compile(r"Save", re.I)).first,
+                active.get_by_role("link", name=re.compile(r"Save", re.I)).first,
+                active.get_by_text(re.compile(r"Save", re.I)).first,
+                active.locator("#btnSave, input[value*='Save'], button:has-text('Save')").first,
             ]
             for loc in save_locators:
                 try:
-                    loc.click(timeout=4000)
-                    log.append("Clicked Save link in merge iframe")
-                    save_ok = True
-                    break
+                    loc.scroll_into_view_if_needed(timeout=2000)
                 except Exception:  # noqa: BLE001
-                    continue
+                    pass
+                for mode in ("normal", "force", "js"):
+                    try:
+                        if mode == "normal":
+                            loc.click(timeout=3000)
+                        elif mode == "force":
+                            loc.click(timeout=3000, force=True)
+                        else:
+                            loc.evaluate("el => el.click()")
+                        log.append(f"Clicked Save in merge iframe ({mode})")
+                        save_ok = True
+                        break
+                    except Exception:  # noqa: BLE001
+                        continue
+                if save_ok:
+                    break
+
             if not save_ok:
-                log.append("Could not click Save link in merge iframe")
+                # Last resort: scan anchors in this frame for Save text / postback
+                try:
+                    clicked = active.evaluate(
+                        """
+                        () => {
+                          const anchors = Array.from(document.querySelectorAll('a, input[type=submit], button'));
+                          for (const el of anchors) {
+                            const text = (el.innerText || el.value || '').trim();
+                            if (/save/i.test(text)) {
+                              el.click();
+                              return text;
+                            }
+                          }
+                          return null;
+                        }
+                        """
+                    )
+                    if clicked:
+                        log.append(f"Clicked Save via DOM scan ({clicked!r})")
+                        save_ok = True
+                    else:
+                        log.append("Could not click Save link in merge iframe")
+                except Exception as exc:  # noqa: BLE001
+                    log.append(f"Could not click Save link in merge iframe: {exc}")
             ok = save_ok and ok
 
             # Give JS confirm() or secondary HTML confirm time to appear
