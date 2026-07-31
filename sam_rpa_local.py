@@ -557,8 +557,22 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
 
         host_page.on("dialog", _accept_dialog)
         try:
-            # Save is a LINK in the merge iframe; label may include an icon/emoji (e.g. "💾 Save")
-            save_ok = False
+            # CDP-attached Chrome sometimes mishandles native dialogs.
+            # Force confirm()/alert() to auto-accept in this page + merge frame.
+            for ctx in (host_page, active):
+                try:
+                    ctx.evaluate(
+                        """
+                        () => {
+                          window.__samConfirmPatched = true;
+                          window.confirm = (msg) => { window.__samLastConfirm = String(msg||''); return true; };
+                          window.alert = (msg) => { window.__samLastAlert = String(msg||''); };
+                        }
+                        """
+                    )
+                    log.append("Patched window.confirm/alert to auto-accept")
+                except Exception as exc:  # noqa: BLE001
+                    log.append(f"Could not patch confirm on context: {exc.__class__.__name__}")
             save_locators = [
                 active.locator("a").filter(has_text=re.compile(r"Save", re.I)).first,
                 active.get_by_role("link", name=re.compile(r"Save", re.I)).first,
@@ -585,9 +599,7 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
                         continue
                 if save_ok:
                     break
-
             if not save_ok:
-                # Last resort: scan anchors in this frame for Save text / postback
                 try:
                     clicked = active.evaluate(
                         """
@@ -595,10 +607,7 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
                           const anchors = Array.from(document.querySelectorAll('a, input[type=submit], button'));
                           for (const el of anchors) {
                             const text = (el.innerText || el.value || '').trim();
-                            if (/save/i.test(text)) {
-                              el.click();
-                              return text;
-                            }
+                            if (/save/i.test(text)) { el.click(); return text; }
                           }
                           return null;
                         }
@@ -613,40 +622,68 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
                     log.append(f"Could not click Save link in merge iframe: {exc}")
             ok = save_ok and ok
 
-            # Give JS confirm() or secondary HTML confirm time to appear
-            host_page.wait_for_timeout(1500)
-            if dialogs:
-                for d in dialogs:
-                    log.append(f"Accepted JS dialog → {d}")
-            else:
-                # HTML/button confirm on host page or frame
-                confirm_ok = False
-                for ctx in (host_page, active):
-                    for name in ("Yes", "OK", "Confirm", "Yes, merge these records"):
-                        try:
-                            ctx.get_by_role(
-                                "button", name=re.compile(rf"^{re.escape(name)}$", re.I)
-                            ).first.click(timeout=2000)
-                            log.append(f"Clicked confirm '{name}'")
-                            confirm_ok = True
-                            break
-                        except Exception:  # noqa: BLE001
+            # If confirm() was patched, read what message would have been shown
+            try:
+                last_confirm = active.evaluate("() => window.__samLastConfirm || null")
+                if last_confirm:
+                    log.append(f"window.confirm was auto-accepted: {str(last_confirm)[:180]}")
+                    confirmed = True
+                else:
+                    confirmed = False
+            except Exception:  # noqa: BLE001
+                confirmed = False
+
+            # Also poll for HTML Yes if native confirm wasn't used
+            if not confirmed:
+                for _ in range(16):  # ~8s
+                    if dialogs:
+                        for d in dialogs:
+                            log.append(f"Accepted JS dialog → {d}")
+                        confirmed = True
+                        break
+                    contexts = [host_page]
+                    try:
+                        contexts.extend(host_page.frames)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    for ctx in contexts:
+                        for pattern in (
+                            r"Yes,\s*merge these records",
+                            r"^Yes$",
+                            r"^OK$",
+                            r"^Confirm$",
+                        ):
                             try:
-                                ctx.get_by_text(
-                                    re.compile(rf"^{re.escape(name)}$", re.I)
-                                ).first.click(timeout=2000, force=True)
-                                log.append(f"Clicked confirm text '{name}'")
-                                confirm_ok = True
+                                ctx.get_by_role(
+                                    "button", name=re.compile(pattern, re.I)
+                                ).first.click(timeout=700, force=True)
+                                log.append(f"Clicked confirm button /{pattern}/")
+                                confirmed = True
                                 break
                             except Exception:  # noqa: BLE001
-                                continue
-                    if confirm_ok:
+                                try:
+                                    ctx.locator(
+                                        "a, button, input[type=button], input[type=submit]"
+                                    ).filter(
+                                        has_text=re.compile(pattern, re.I)
+                                    ).first.click(timeout=700, force=True)
+                                    log.append(f"Clicked confirm control /{pattern}/")
+                                    confirmed = True
+                                    break
+                                except Exception:  # noqa: BLE001
+                                    continue
+                        if confirmed:
+                            break
+                    if confirmed:
                         break
-                if not confirm_ok:
-                    log.append(
-                        "No JS/HTML confirm detected after Save — "
-                        "if merge did not stick, SAM may need a Yes click we missed"
-                    )
+                    host_page.wait_for_timeout(500)
+
+            if not confirmed:
+                dump_visible_controls(host_page, log)
+                log.append(
+                    "No confirm detected after Save — "
+                    "if Yes is visible, is it a browser popup or an on-page button?"
+                )
 
             log.append("Waiting for SAM to finish merge...")
             host_page.wait_for_timeout(3000)
