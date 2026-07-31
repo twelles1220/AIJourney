@@ -42,14 +42,16 @@ SELECTORS: dict[str, Any] = {
     "merge_birth_mother": {
         "text": "Merge Birth Mother",
     },
-    # Exact control label may differ — update after inspecting the dialog
+    # From live screenshot of "Merge Entities" modal:
+    # label is "Merge To:" (paste master Birth Mother ID here)
     "master_id_input": {
-        "label": "Birth Mother ID",
+        "label": "Merge To",
     },
     "save_button": {
         "role": "button",
         "name": "Save",
     },
+    # May appear after Save — keep as optional confirm
     "confirm_merge_button": {
         "role": "button",
         "name": "Yes, merge these records",

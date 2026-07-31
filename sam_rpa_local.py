@@ -232,43 +232,87 @@ def _maybe_click(page, spec: dict, *, dry_run: bool, log: list[str]) -> bool:
 
 def _maybe_fill_fallback(page, spec: dict, value: str, *, log: list[str]) -> bool:
     """Try alternate ways to find the merge ID field when label lookup fails."""
+    root = _modal_root(page)
     try:
         if "placeholder" in spec:
-            loc = page.get_by_placeholder(re.compile(spec["placeholder"], re.I)).first
+            loc = root.get_by_placeholder(re.compile(spec["placeholder"], re.I)).first
             loc.fill(value, timeout=4000)
             log.append(f"Filled via placeholder '{spec['placeholder']}' with {value}")
             return True
         if "name_contains" in spec:
-            loc = page.locator(f"input[name*='{spec['name_contains']}'], input[id*='{spec['name_contains']}']").first
+            loc = root.locator(
+                f"input[name*='{spec['name_contains']}'], input[id*='{spec['name_contains']}']"
+            ).first
             loc.fill(value, timeout=4000)
             log.append(f"Filled via name/id containing '{spec['name_contains']}' with {value}")
             return True
         if "label" in spec:
-            loc = page.get_by_label(re.compile(re.escape(spec["label"]), re.I)).first
-            loc.fill(value, timeout=4000)
-            log.append(f"Filled via label '{spec['label']}' with {value}")
-            return True
+            try:
+                root.get_by_label(re.compile(re.escape(spec["label"]), re.I)).first.fill(
+                    value, timeout=4000
+                )
+                log.append(f"Filled via label '{spec['label']}' with {value}")
+                return True
+            except Exception:  # noqa: BLE001
+                root.get_by_text(re.compile(re.escape(spec["label"]), re.I)).locator(
+                    "xpath=following::input[1]"
+                ).fill(value, timeout=4000)
+                log.append(f"Filled via nearby label text '{spec['label']}' with {value}")
+                return True
     except Exception as exc:  # noqa: BLE001
         log.append(f"Fallback fill missed ({spec}): {exc.__class__.__name__}")
     return False
+
+
+def _modal_root(page):
+    """Prefer the Merge Entities modal/dialog if present."""
+    candidates = [
+        page.get_by_role("dialog"),
+        page.locator(".modal.show, .modal.in, [role='dialog'], .ui-dialog, .modal"),
+        page.get_by_text(re.compile(r"Merge Entities", re.I)).locator(
+            "xpath=ancestor-or-self::*[contains(@class,'modal') or @role='dialog' or contains(@class,'ui-dialog')][1]"
+        ),
+    ]
+    for loc in candidates:
+        try:
+            if loc.count() > 0:
+                first = loc.first
+                if first.is_visible():
+                    return first
+        except Exception:  # noqa: BLE001
+            continue
+    return page
+
+
+def _maybe_fill(page, spec: dict, value: str, *, dry_run: bool, log: list[str]) -> bool:
     label = spec.get("label") or spec.get("name") or "input"
     if dry_run:
-        log.append(f"DRY-RUN would paste Birth Mother ID '{value}' into: {label}")
+        log.append(f"DRY-RUN would paste master ID '{value}' into: {label}")
         return True
+
+    root = _modal_root(page)
     try:
         if "label" in spec:
-            page.get_by_label(re.compile(re.escape(spec["label"]), re.I)).first.fill(
-                value, timeout=8000
-            )
-        elif "role" in spec and "name" in spec:
-            page.get_by_role(spec["role"], name=re.compile(re.escape(spec["name"]), re.I)).first.fill(
-                value, timeout=8000
-            )
-        else:
-            log.append(f"No fill strategy for selector spec: {spec}")
-            return False
-        log.append(f"Filled '{label}' with {value}")
-        return True
+            try:
+                root.get_by_label(re.compile(re.escape(spec["label"]), re.I)).first.fill(
+                    value, timeout=5000
+                )
+                log.append(f"Filled via label '{label}' with {value}")
+                return True
+            except Exception:  # noqa: BLE001
+                root.get_by_text(re.compile(re.escape(spec["label"]), re.I)).locator(
+                    "xpath=following::input[1]"
+                ).fill(value, timeout=5000)
+                log.append(f"Filled via nearby label text '{label}' with {value}")
+                return True
+        if "role" in spec and "name" in spec:
+            root.get_by_role(
+                spec["role"], name=re.compile(re.escape(spec["name"]), re.I)
+            ).first.fill(value, timeout=5000)
+            log.append(f"Filled '{label}' with {value}")
+            return True
+        log.append(f"No fill strategy for selector spec: {spec}")
+        return False
     except Exception as exc:  # noqa: BLE001
         log.append(f"Fill failed for '{label}': {exc}")
         return False
@@ -418,46 +462,88 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
         merge_opened = ok
 
     if not dry_run and merge_opened:
-        active.wait_for_timeout(1500)
-        if all_pages is not None:
-            try:
-                refreshed = active.context.pages
-                if refreshed and refreshed[-1].url != active.url:
-                    # If a newer distinct page appeared, prefer it
-                    newest = refreshed[-1]
-                    if "merge" in (newest.url or "").lower() or newest is not active:
-                        if newest.url != active.url:
-                            active = newest
-                            log.append(f"Switched to newest tab after Merge: {active.url}")
-            except Exception as exc:  # noqa: BLE001
-                log.append(f"Could not check for new merge tab: {exc}")
+        active.wait_for_timeout(1000)
+        # Wait for the Merge Entities modal (same-page popup, not a new tab)
+        try:
+            active.get_by_text(re.compile(r"Merge Entities", re.I)).first.wait_for(
+                state="visible", timeout=8000
+            )
+            log.append("Merge Entities modal is visible")
+        except Exception:  # noqa: BLE001
+            log.append("Merge Entities modal not detected yet; continuing")
+        try:
+            active.get_by_text(re.compile(r"Merge To", re.I)).first.wait_for(
+                state="visible", timeout=5000
+            )
+            log.append("Merge To field label is visible")
+        except Exception:  # noqa: BLE001
+            log.append("Merge To label not detected yet")
         dump_visible_controls(active, log)
     filled = _maybe_fill(active, SELECTORS["master_id_input"], master_id, dry_run=dry_run, log=log)
     if not filled and not dry_run:
-        # Try common SAM-ish field fallbacks
         for fallback in (
-            {"placeholder": "Birth Mother"},
-            {"name_contains": "chmid"},
+            {"label": "Merge To"},
+            {"placeholder": "Merge"},
             {"name_contains": "merge"},
+            {"name_contains": "chmid"},
             {"label": "Mother ID"},
-            {"label": "Merge into"},
         ):
             if _maybe_fill_fallback(active, fallback, master_id, log=log):
                 filled = True
                 break
         if not filled:
-            dump_visible_controls(active, log)
-            log.append(
-                "Fill still failing. On the merge screen, run: python sam_rpa_local.py --inspect"
-            )
+            # Last resort: first visible text input inside modal
+            try:
+                root = _modal_root(active)
+                root.locator("input[type='text'], input:not([type])").first.fill(
+                    master_id, timeout=5000
+                )
+                log.append(f"Filled first modal text input with {master_id}")
+                filled = True
+            except Exception as exc:  # noqa: BLE001
+                log.append(f"First-modal-input fill failed: {exc}")
+                dump_visible_controls(active, log)
     ok = filled and ok
 
     if dry_run:
         log.append("DRY-RUN stop point: would Save + confirm merge next")
         status = "dry_run_ok" if ok else "dry_run_selector_issues"
     else:
-        ok = _maybe_click(active, SELECTORS["save_button"], dry_run=False, log=log) and ok
-        ok = _maybe_click(active, SELECTORS["confirm_merge_button"], dry_run=False, log=log) and ok
+        # Click Save inside the modal
+        root = _modal_root(active)
+        save_ok = False
+        for save_spec in (
+            SELECTORS["save_button"],
+            {"text": "Save"},
+            {"role": "button", "name": "Save"},
+        ):
+            # Temporarily scope clicks to modal when possible
+            if _maybe_click(root if hasattr(root, "get_by_role") else active, save_spec, dry_run=False, log=log):
+                save_ok = True
+                break
+        if not save_ok:
+            try:
+                root.get_by_text(re.compile(r"Save", re.I)).first.click(force=True, timeout=5000)
+                log.append("Clicked Save via modal text")
+                save_ok = True
+            except Exception as exc:  # noqa: BLE001
+                log.append(f"Save click failed: {exc}")
+        ok = save_ok and ok
+
+        active.wait_for_timeout(1000)
+        # Optional second confirm dialog from Loom ("Yes, merge these records")
+        confirm_ok = _maybe_click(
+            active, SELECTORS["confirm_merge_button"], dry_run=False, log=log
+        )
+        if not confirm_ok:
+            # Try common confirm labels; absence is OK if SAM merges on Save alone
+            for name in ("Yes", "OK", "Confirm", "Yes, merge these records"):
+                if _maybe_click(active, {"text": name}, dry_run=False, log=log):
+                    confirm_ok = True
+                    break
+            if not confirm_ok:
+                log.append("No secondary confirm dialog found (may be fine if Save completed merge)")
+
         log.append("Waiting briefly for SAM (known to be slow)...")
         active.wait_for_timeout(5000)
         status = "merged_attempted" if ok else "failed_selectors"
