@@ -12,6 +12,7 @@ from sam_rpa_local import (
     _SAVE_SCHEDULE_JS,
     _YES_SCHEDULE_JS,
     load_queue,
+    main,
     normalize_item,
 )
 
@@ -66,6 +67,61 @@ class SamPlaybookTests(unittest.TestCase):
         self.assertIn("setTimeout", _SAVE_SCHEDULE_JS)
         self.assertIn("confirm", _SAVE_SCHEDULE_JS)
         self.assertIn("setTimeout", _YES_SCHEDULE_JS)
+
+    def test_id_filter_selects_queue_item(self):
+        # --id filters by queue row id; report order is irrelevant because each
+        # pair carries its own master/duplicate profile ids.
+        from unittest.mock import MagicMock, patch
+
+        queue = {
+            "items": [
+                {
+                    "id": "pair-001",
+                    "decision": "approved",
+                    "match_reason": "name",
+                    "master": {"birth_mother_id": "1"},
+                    "duplicate": {"birth_mother_id": "2"},
+                },
+                {
+                    "id": "pair-003",
+                    "decision": "approved",
+                    "match_reason": "name",
+                    "master": {"birth_mother_id": "5564"},
+                    "duplicate": {"birth_mother_id": "10522"},
+                },
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "q.json"
+            path.write_text(json.dumps(queue), encoding="utf-8")
+            captured: list[str] = []
+
+            def fake_run(page, item, *, dry_run, all_pages=None):
+                captured.append(item["id"])
+                return {"id": item["id"], "status": "dry_run_ok", "ok": True, "log": []}
+
+            fake_page = MagicMock()
+            fake_page.url = "https://example.test/SAM/Ch/Ch_M_Vw.aspx?chmid=10522"
+            fake_context = MagicMock()
+            fake_context.pages = [fake_page]
+            fake_browser = MagicMock()
+            fake_browser.contexts = [fake_context]
+
+            with patch("sam_rpa_local.connect_browser", return_value=(MagicMock(), fake_browser)):
+                with patch("sam_rpa_local.run_one_merge", side_effect=fake_run):
+                    rc = main(
+                        [
+                            "--queue",
+                            str(path),
+                            "--dry-run",
+                            "--id",
+                            "pair-003",
+                            "--output-dir",
+                            str(Path(tmp) / "out"),
+                        ]
+                    )
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured, ["pair-003"])
 
 
 if __name__ == "__main__":

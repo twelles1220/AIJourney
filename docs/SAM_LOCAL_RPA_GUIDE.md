@@ -284,12 +284,14 @@ Goal: one real merge while you watch the screen.
 - [ ] Your queue still has only the pair(s) you intend
 - [ ] You are ready to watch the Chrome window
 
-### 5.2 Run live with limit 1
-- [ ] In the Python terminal, run:
+### 5.2 Run live for one specific pair
+- [ ] In the Python terminal, run the pair by **id** (profile IDs are on the queue row; report sort order does not matter):
 
 ```powershell
-python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.0.1:9222 --live --confirm-live --limit 1
+python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.0.1:9222 --live --confirm-live --id pair-003
 ```
+
+Or use `--limit 1` only when the first remaining queue row is the pair you want.
 
 ### 5.3 Watch Chrome during the run
 Watch for the script trying to:

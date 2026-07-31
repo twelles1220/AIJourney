@@ -873,6 +873,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--limit", type=int, default=0, help="Max items to process (0 = all)")
     parser.add_argument(
+        "--id",
+        action="append",
+        default=[],
+        dest="item_ids",
+        help="Process only this queue item id (repeatable), e.g. --id pair-003",
+    )
+    parser.add_argument(
         "--output-dir",
         default="outputs/sam_rpa",
         help="Where to write the run audit log",
@@ -903,10 +910,20 @@ def main(argv: list[str] | None = None) -> int:
 
         queue_path = Path(args.queue)
         items = [normalize_item(i) for i in load_queue(queue_path)]
+        if args.item_ids:
+            wanted = {str(x) for x in args.item_ids}
+            matched = [i for i in items if str(i.get("id") or "") in wanted]
+            missing = sorted(wanted - {str(i.get("id") or "") for i in matched})
+            if missing:
+                print(f"Queue id(s) not found: {', '.join(missing)}", file=sys.stderr)
+                return 2
+            items = matched
         if args.limit and args.limit > 0:
             items = items[: args.limit]
 
         print(f"Loaded {len(items)} queue item(s) from {queue_path}")
+        if args.item_ids:
+            print(f"Filtered to id(s): {', '.join(args.item_ids)}")
         print(f"Mode: {'DRY-RUN' if args.dry_run else 'LIVE'}")
 
         contexts = browser.contexts
