@@ -13,71 +13,115 @@ https://www.loom.com/share/55df212f59a247799830c617cf804470
 Goal: your computer can run the RPA script.
 
 ### 1.1 Open a terminal
-- [ ] Mac: open **Terminal**
 - [ ] Windows: open **PowerShell**
+- [ ] Mac: open **Terminal**
 
-### 1.2 Go to this project folder
-- [ ] Type (edit the path if yours is different):
+### 1.2 Get the project onto your computer (if you don’t have it yet)
 
-```bash
-cd /path/to/AIJourney
+`/path/to/AIJourney` in older notes was only a **placeholder**. Use a real folder.
+
+**Windows (PowerShell) — recommended:**
+
+- [ ] Make a projects folder:
+
+```powershell
+mkdir $HOME\Projects -ErrorAction SilentlyContinue
+cd $HOME\Projects
 ```
 
-- [ ] Press Enter
-- [ ] Confirm you are in the repo (you should see files like `sam_rpa_local.py`)
+- [ ] Clone the repo (only if `AIJourney` is not already there):
 
-```bash
-ls
+```powershell
+git clone https://github.com/twelles1220/AIJourney.git
+cd AIJourney
 ```
 
-### 1.3 Create a Python virtual environment
+- [ ] Switch to the branch with the SAM guide:
+
+```powershell
+git fetch origin
+git checkout cursor/sam-local-rpa-guide-8d37
+```
+
+**If you already cloned it earlier:**
+
+- [ ] Find it:
+
+```powershell
+Get-ChildItem -Path $HOME -Filter AIJourney -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+```
+
+- [ ] Then `cd` into the path it prints, for example:
+
+```powershell
+cd $HOME\Projects\AIJourney
+```
+
+### 1.3 Confirm you are in the right folder
 - [ ] Run:
 
-```bash
-python3 -m venv .venv
+```powershell
+pwd
+dir
+```
+
+- [ ] You should see files like `sam_rpa_local.py`, `docs`, `agents`
+- [ ] If you do **not** see `sam_rpa_local.py`, you are in the wrong folder — go back to 1.2
+
+### 1.4 Create a Python virtual environment
+- [ ] Windows (try this first):
+
+```powershell
+python -m venv .venv
+```
+
+- [ ] If `python` is not found, try:
+
+```powershell
+py -3 -m venv .venv
 ```
 
 - [ ] Wait until it finishes with no error
 
-### 1.4 Turn the virtual environment on
-- [ ] Mac/Linux:
-
-```bash
-source .venv/bin/activate
-```
-
+### 1.5 Turn the virtual environment on
 - [ ] Windows:
 
 ```powershell
-.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
+```
+
+- [ ] If PowerShell blocks activation, run this once, then retry activate:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
 - [ ] Confirm it worked: your prompt should show `(.venv)`
 
-### 1.5 Install Python packages
+### 1.6 Install Python packages
 - [ ] Run:
 
-```bash
-pip install -r requirements.txt
-pip install playwright
+```powershell
+python -m pip install -r requirements.txt
+python -m pip install playwright
 ```
 
 - [ ] Wait until both finish with no error
 
-### 1.6 Install browser files Playwright needs
+### 1.7 Install browser files Playwright needs
 - [ ] Run:
 
-```bash
+```powershell
 playwright install chromium
 ```
 
 - [ ] Wait until it finishes
 
-### 1.7 Confirm Step 1 is done
+### 1.8 Confirm Step 1 is done
 - [ ] Run:
 
-```bash
-python3 sam_rpa_local.py --help
+```powershell
+python sam_rpa_local.py --help
 ```
 
 - [ ] You should see help text (flags like `--queue`, `--dry-run`, `--live`)
@@ -92,15 +136,15 @@ Goal: create a small JSON file listing what to merge (1 pair for the first try).
 ### 2.1 Create the outputs folder
 - [ ] In the same terminal (venv still on), run:
 
-```bash
-mkdir -p outputs
+```powershell
+mkdir outputs -ErrorAction SilentlyContinue
 ```
 
 ### 2.2 Copy the example queue file
 - [ ] Run:
 
-```bash
-cp samples/sam_merge_queue.example.json outputs/sam_merge_queue.json
+```powershell
+Copy-Item samples\sam_merge_queue.example.json outputs\sam_merge_queue.json
 ```
 
 ### 2.3 Open the queue file in an editor
@@ -187,21 +231,25 @@ Goal: prove the script can attach to your Chrome and read the queue. No Save/con
 
 ### 4.1 Go back to your Python terminal
 - [ ] Make sure `(.venv)` is still showing
-- [ ] If not, run `source .venv/bin/activate` (or Windows activate command) again
-- [ ] Make sure you are in the repo folder:
+- [ ] If not, activate again:
 
-```bash
-cd /path/to/AIJourney
+```powershell
+cd $HOME\Projects\AIJourney
+.\.venv\Scripts\Activate.ps1
+```
+
+- [ ] Confirm you are in the repo:
+
+```powershell
+pwd
+dir sam_rpa_local.py
 ```
 
 ### 4.2 Run dry-run
 - [ ] Run:
 
-```bash
-python3 sam_rpa_local.py \
-  --queue outputs/sam_merge_queue.json \
-  --cdp http://127.0.0.1:9222 \
-  --dry-run
+```powershell
+python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.0.1:9222 --dry-run
 ```
 
 ### 4.3 Check the terminal output
@@ -239,13 +287,8 @@ Goal: one real merge while you watch the screen.
 ### 5.2 Run live with limit 1
 - [ ] In the Python terminal, run:
 
-```bash
-python3 sam_rpa_local.py \
-  --queue outputs/sam_merge_queue.json \
-  --cdp http://127.0.0.1:9222 \
-  --live \
-  --confirm-live \
-  --limit 1
+```powershell
+python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.0.1:9222 --live --confirm-live --limit 1
 ```
 
 ### 5.3 Watch Chrome during the run
@@ -295,13 +338,8 @@ Goal: do a few more merges safely.
 ### 6.3 Live small batch
 - [ ] Start small:
 
-```bash
-python3 sam_rpa_local.py \
-  --queue outputs/sam_merge_queue.json \
-  --cdp http://127.0.0.1:9222 \
-  --live \
-  --confirm-live \
-  --limit 3
+```powershell
+python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.0.1:9222 --live --confirm-live --limit 3
 ```
 
 - [ ] Watch the first one or two
@@ -323,8 +361,8 @@ python3 sam_rpa_local.py \
 
 # Quick “where am I?” checklist
 
-- [ ] Step 1 done = `python3 sam_rpa_local.py --help` works  
-- [ ] Step 2 done = `outputs/sam_merge_queue.json` has a real approved pair  
+- [ ] Step 1 done = `python sam_rpa_local.py --help` works  
+- [ ] Step 2 done = `outputs\sam_merge_queue.json` has a real approved pair  
 - [ ] Step 3 done = debug Chrome open + logged into SAM + Duplicate Records visible  
 - [ ] Step 4 done = dry-run attached and wrote an audit log  
 - [ ] Step 5 done = one live merge verified in SAM  
