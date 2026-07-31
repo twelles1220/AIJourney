@@ -364,6 +364,46 @@ python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.
 
 ---
 
+# STEP 7 — Build the full queue from a CSV export (optional)
+
+Goal: stop hand-editing IDs. Export the Duplicate Records report once, generate the full JSON, then batch with `--limit`.
+
+### 7.1 Export / save the CSV
+- [ ] Export or copy the Duplicate Records report to a `.csv` file
+- [ ] Put it somewhere easy, e.g. `outputs\duplicates.csv`
+- [ ] Ideal columns (names can vary — the script has aliases):
+  - left/right Birth Mother IDs
+  - left/right names
+  - left/right SF Migration Contact ID (if present)
+  - match reason (`name` / `phone`)
+  - notes flags if available
+
+### 7.2 Generate the queue
+- [ ] Run:
+
+```powershell
+python sam_queue_from_csv.py outputs\duplicates.csv -o outputs\sam_merge_queue.json --approve-name
+```
+
+- [ ] Confirm the printed stats (approved name vs phone-manual vs skipped)
+
+### 7.3 Batch merges
+- [ ] Keep Chrome logged in on the debug port
+- [ ] Run batches:
+
+```powershell
+python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.0.1:9222 --live --confirm-live --limit 3
+```
+
+- [ ] Raise `--limit` only after a batch looks clean
+- [ ] Phone matches stay `review_needed` and are skipped automatically
+
+### 7.4 Or send the CSV here
+- [ ] Paste/upload the CSV (or at least the header row + a few sample rows)
+- [ ] I will map columns and generate `outputs\sam_merge_queue.json` for you
+
+---
+
 # Quick “where am I?” checklist
 
 - [ ] Step 1 done = `python sam_rpa_local.py --help` works  
@@ -372,6 +412,7 @@ python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.
 - [ ] Step 4 done = dry-run attached and wrote an audit log  
 - [ ] Step 5 done = one live merge verified in SAM  
 - [ ] Step 6 done = small batch successful  
+- [ ] Step 7 done = CSV → full queue → batched `--limit` runs  
 
 ---
 
