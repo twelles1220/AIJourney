@@ -546,43 +546,79 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
         log.append("DRY-RUN stop point: would Save + confirm merge next")
         status = "dry_run_ok" if ok else "dry_run_selector_issues"
     else:
-        # Click Save inside the modal
-        root = _modal_root(active)
-        save_ok = False
-        for save_spec in (
-            SELECTORS["save_button"],
-            {"text": "Save"},
-            {"role": "button", "name": "Save"},
-        ):
-            # Temporarily scope clicks to modal when possible
-            if _maybe_click(root if hasattr(root, "get_by_role") else active, save_spec, dry_run=False, log=log):
-                save_ok = True
-                break
-        if not save_ok:
-            try:
-                root.get_by_text(re.compile(r"Save", re.I)).first.click(force=True, timeout=5000)
-                log.append("Clicked Save via modal text")
-                save_ok = True
-            except Exception as exc:  # noqa: BLE001
-                log.append(f"Save click failed: {exc}")
-        ok = save_ok and ok
+        # Dialogs fire on the Page, not the iframe Frame
+        host_page = active.page if hasattr(active, "page") else active
+        dialogs: list[str] = []
 
-        active.wait_for_timeout(800)
-        # Optional confirm — successful run needed a simple "Yes"
-        confirm_ok = _maybe_click(
-            active, SELECTORS["confirm_merge_button"], dry_run=False, log=log
-        )
-        if not confirm_ok:
-            for name in ("Yes", "OK", "Confirm"):
-                if _maybe_click(active, {"text": name}, dry_run=False, log=log):
-                    confirm_ok = True
+        def _accept_dialog(dialog) -> None:
+            msg = (dialog.message or "").replace("\n", " ")[:180]
+            dialogs.append(f"{dialog.type}:{msg}")
+            dialog.accept()
+
+        host_page.on("dialog", _accept_dialog)
+        try:
+            # Save is a LINK in the merge iframe (from successful inspect snapshot)
+            save_ok = False
+            save_locators = [
+                active.get_by_role("link", name=re.compile(r"^Save$", re.I)).first,
+                active.locator("a", has_text=re.compile(r"^Save$", re.I)).first,
+                active.get_by_text(re.compile(r"^Save$", re.I)).first,
+            ]
+            for loc in save_locators:
+                try:
+                    loc.click(timeout=4000)
+                    log.append("Clicked Save link in merge iframe")
+                    save_ok = True
                     break
-            if not confirm_ok:
-                log.append("No secondary confirm dialog found (may be fine if Save completed merge)")
+                except Exception:  # noqa: BLE001
+                    continue
+            if not save_ok:
+                log.append("Could not click Save link in merge iframe")
+            ok = save_ok and ok
 
-        log.append("Waiting briefly for SAM...")
-        active.wait_for_timeout(2500)
-        status = "merged_attempted" if ok else "failed_selectors"
+            # Give JS confirm() or secondary HTML confirm time to appear
+            host_page.wait_for_timeout(1500)
+            if dialogs:
+                for d in dialogs:
+                    log.append(f"Accepted JS dialog → {d}")
+            else:
+                # HTML/button confirm on host page or frame
+                confirm_ok = False
+                for ctx in (host_page, active):
+                    for name in ("Yes", "OK", "Confirm", "Yes, merge these records"):
+                        try:
+                            ctx.get_by_role(
+                                "button", name=re.compile(rf"^{re.escape(name)}$", re.I)
+                            ).first.click(timeout=2000)
+                            log.append(f"Clicked confirm '{name}'")
+                            confirm_ok = True
+                            break
+                        except Exception:  # noqa: BLE001
+                            try:
+                                ctx.get_by_text(
+                                    re.compile(rf"^{re.escape(name)}$", re.I)
+                                ).first.click(timeout=2000, force=True)
+                                log.append(f"Clicked confirm text '{name}'")
+                                confirm_ok = True
+                                break
+                            except Exception:  # noqa: BLE001
+                                continue
+                    if confirm_ok:
+                        break
+                if not confirm_ok:
+                    log.append(
+                        "No JS/HTML confirm detected after Save — "
+                        "if merge did not stick, SAM may need a Yes click we missed"
+                    )
+
+            log.append("Waiting for SAM to finish merge...")
+            host_page.wait_for_timeout(3000)
+            status = "merged_attempted" if ok else "failed_selectors"
+        finally:
+            try:
+                host_page.remove_listener("dialog", _accept_dialog)
+            except Exception:  # noqa: BLE001
+                pass
 
     return {
         "id": item.get("id"),
