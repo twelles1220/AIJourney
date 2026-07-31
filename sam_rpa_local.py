@@ -204,20 +204,21 @@ def _maybe_click(page, spec: dict, *, dry_run: bool, log: list[str]) -> bool:
         except Exception as first_exc:  # noqa: BLE001
             log.append(f"Normal click blocked for '{label}' ({first_exc.__class__.__name__}); trying force/JS")
 
-        # SAM sidebars often report "outside of the viewport" — force + JS fallbacks
+        # SAM sidebars often report "outside of the viewport" — force first.
+        # Avoid JS click for app links: it can skip ASP.NET/Bootstrap handlers.
         try:
             locator.click(timeout=5000, force=True)
             log.append(f"Clicked (force): {label}")
             return True
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as force_exc:  # noqa: BLE001
+            log.append(f"Force click failed for '{label}': {force_exc.__class__.__name__}")
 
         try:
-            locator.evaluate("el => el.click()")
-            log.append(f"Clicked (JS): {label}")
+            locator.dispatch_event("click")
+            log.append(f"Clicked (dispatch): {label}")
             return True
-        except Exception as js_exc:  # noqa: BLE001
-            log.append(f"Click failed for '{label}': {js_exc}")
+        except Exception as disp_exc:  # noqa: BLE001
+            log.append(f"Click failed for '{label}': {disp_exc}")
             return False
     except Exception as exc:  # noqa: BLE001
         # Last-chance plain text
@@ -264,8 +265,46 @@ def _maybe_fill_fallback(page, spec: dict, value: str, *, log: list[str]) -> boo
     return False
 
 
+def find_merge_frame(page, *, timeout_ms: int = 10000):
+    """
+    The Merge Entities UI is a modal and may live in an iframe.
+    Poll the main page + all frames for 'Merge To' / 'Merge Entities'.
+    Returns (frame_or_page, log_note).
+    """
+    import time
+
+    deadline = time.time() + (timeout_ms / 1000)
+    last_note = "no merge frame yet"
+    while time.time() < deadline:
+        candidates = [page, *page.frames]
+        for frame in candidates:
+            try:
+                if frame.get_by_text(re.compile(r"Merge Entities", re.I)).count() > 0:
+                    return frame, f"found Merge Entities in frame url={getattr(frame, 'url', page.url)}"
+                if frame.get_by_text(re.compile(r"Merge To", re.I)).count() > 0:
+                    return frame, f"found Merge To in frame url={getattr(frame, 'url', page.url)}"
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            for sel in ("iframe", "iframe[src*='Merge']", "iframe[src*='merge']", ".modal iframe"):
+                for fr in page.locator(sel).all():
+                    try:
+                        content = fr.content_frame()
+                        if not content:
+                            continue
+                        if content.get_by_text(re.compile(r"Merge (Entities|To)", re.I)).count() > 0:
+                            return content, f"found merge UI via iframe selector {sel}"
+                    except Exception:  # noqa: BLE001
+                        continue
+        except Exception:  # noqa: BLE001
+            pass
+        page.wait_for_timeout(500)
+        last_note = f"still waiting; frames={len(page.frames)}"
+    return None, last_note
+
+
 def _modal_root(page):
-    """Prefer the Merge Entities modal/dialog if present."""
+    """Prefer the Merge Entities modal/dialog container if present on this page/frame."""
     candidates = [
         page.get_by_role("dialog"),
         page.locator(".modal.show, .modal.in, [role='dialog'], .ui-dialog, .modal"),
@@ -415,14 +454,24 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
     ok = True
     ok = _maybe_click(active, SELECTORS["advanced_options"], dry_run=dry_run, log=log) and ok
     if not dry_run:
-        active.wait_for_timeout(1500)
+        # ADVANCED OPTIONS is a Bootstrap collapse; wait for menu items
+        active.wait_for_timeout(2000)
         try:
             active.get_by_text(re.compile(r"Merge\s+Birth\s+Mother", re.I)).first.wait_for(
-                state="visible", timeout=5000
+                state="visible", timeout=10000
             )
             log.append("Merge Birth Mother became visible after ADVANCED OPTIONS")
         except Exception:  # noqa: BLE001
-            log.append("Merge Birth Mother not visible yet; will still attempt click")
+            # Try clicking ADVANCED OPTIONS again if collapsed
+            _maybe_click(active, SELECTORS["advanced_options"], dry_run=False, log=log)
+            active.wait_for_timeout(1500)
+            try:
+                active.get_by_text(re.compile(r"Merge\s+Birth\s+Mother", re.I)).first.wait_for(
+                    state="visible", timeout=8000
+                )
+                log.append("Merge Birth Mother visible after second ADVANCED OPTIONS click")
+            except Exception:  # noqa: BLE001
+                log.append("Merge Birth Mother not visible yet; will still attempt click")
 
     # Prefer navigating directly via the Merge Birth Mother href if present
     merge_opened = False
@@ -451,8 +500,11 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
                     log.append(f"Merge form URL now: {active.url}")
                     merge_opened = True
             else:
-                ok = _maybe_click(active, SELECTORS["merge_birth_mother"], dry_run=False, log=log) and ok
-                merge_opened = ok
+                # Same-page modal trigger — use force click (not JS) so SAM handlers fire
+                merge_link.click(force=True, timeout=8000)
+                log.append("Clicked (force): Merge Birth Mother")
+                merge_opened = True
+                ok = True
         except Exception as exc:  # noqa: BLE001
             log.append(f"Direct merge navigation failed ({exc}); falling back to click")
             ok = _maybe_click(active, SELECTORS["merge_birth_mother"], dry_run=False, log=log) and ok
@@ -462,22 +514,16 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
         merge_opened = ok
 
     if not dry_run and merge_opened:
-        active.wait_for_timeout(1000)
-        # Wait for the Merge Entities modal (same-page popup, not a new tab)
-        try:
-            active.get_by_text(re.compile(r"Merge Entities", re.I)).first.wait_for(
-                state="visible", timeout=8000
+        merge_ctx, note = find_merge_frame(active, timeout_ms=12000)
+        log.append(f"Merge frame search: {note}")
+        if merge_ctx is not None:
+            active = merge_ctx
+            log.append("Using merge frame/page for Merge To + Save")
+        else:
+            log.append(
+                "Merge modal/iframe not found after click. "
+                "If the modal is visible on screen, tell me — we may need a different trigger."
             )
-            log.append("Merge Entities modal is visible")
-        except Exception:  # noqa: BLE001
-            log.append("Merge Entities modal not detected yet; continuing")
-        try:
-            active.get_by_text(re.compile(r"Merge To", re.I)).first.wait_for(
-                state="visible", timeout=5000
-            )
-            log.append("Merge To field label is visible")
-        except Exception:  # noqa: BLE001
-            log.append("Merge To label not detected yet")
         dump_visible_controls(active, log)
     filled = _maybe_fill(active, SELECTORS["master_id_input"], master_id, dry_run=dry_run, log=log)
     if not filled and not dry_run:
