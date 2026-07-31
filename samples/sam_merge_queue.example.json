@@ -1,0 +1,28 @@
+{
+  "crm_system": "sam",
+  "policy_version": "loom-v1",
+  "notes": "Only include pairs you have already approved. decision must be approved or auto_merge.",
+  "items": [
+    {
+      "id": "example-001",
+      "decision": "approved",
+      "match_reason": "name",
+      "master": {
+        "birth_mother_id": "803",
+        "full_name": "Example Master Name",
+        "sf_migration_contact_id": "SF-12345",
+        "has_children": true,
+        "has_notes": false
+      },
+      "duplicate": {
+        "birth_mother_id": "1300",
+        "full_name": "Example Duplicate Name",
+        "sf_migration_contact_id": null,
+        "has_children": false,
+        "has_notes": false
+      },
+      "skip_if": [],
+      "comments": "Replace with a real approved pair before --live runs."
+    }
+  ]
+}
