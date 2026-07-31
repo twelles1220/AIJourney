@@ -109,8 +109,13 @@ def inspect_pages(browser, output_dir: Path) -> Path:
                 for a in links[:120]:
                     try:
                         text = (a.inner_text(timeout=1000) or "").strip()
+                        href = a.get_attribute("href") or ""
                         if text:
                             page_info["links"].append(text[:120])
+                            if interesting.search(text) or interesting.search(href):
+                                page_info.setdefault("interesting_links", []).append(
+                                    {"text": text[:120], "href": href[:300]}
+                                )
                     except Exception:  # noqa: BLE001
                         continue
                 inputs = page.locator("input, select, textarea").all()
@@ -154,6 +159,10 @@ def inspect_pages(browser, output_dir: Path) -> Path:
         print(f"Links ({len(p.get('links', []))}):")
         for t in p.get("links", [])[:40]:
             print(f"  - {t}")
+        if p.get("interesting_links"):
+            print("Interesting links with hrefs:")
+            for item in p["interesting_links"][:30]:
+                print(f"  - {item['text']} → {item['href']}")
         if p.get("interesting_matches"):
             print(f"Interesting keywords found: {', '.join(p['interesting_matches'])}")
     print(f"\nWrote full inspect dump → {out_path}")
@@ -362,7 +371,6 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
     ok = True
     ok = _maybe_click(active, SELECTORS["advanced_options"], dry_run=dry_run, log=log) and ok
     if not dry_run:
-        # ADVANCED OPTIONS is a Bootstrap collapse; wait for menu items to appear
         active.wait_for_timeout(1500)
         try:
             active.get_by_text(re.compile(r"Merge\s+Birth\s+Mother", re.I)).first.wait_for(
@@ -371,18 +379,56 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
             log.append("Merge Birth Mother became visible after ADVANCED OPTIONS")
         except Exception:  # noqa: BLE001
             log.append("Merge Birth Mother not visible yet; will still attempt click")
-    ok = _maybe_click(active, SELECTORS["merge_birth_mother"], dry_run=dry_run, log=log) and ok
+
+    # Prefer navigating directly via the Merge Birth Mother href if present
+    merge_opened = False
     if not dry_run:
+        try:
+            merge_link = active.get_by_role(
+                "link", name=re.compile(r"Merge\s+Birth\s+Mother", re.I)
+            ).first
+            href = merge_link.get_attribute("href") or ""
+            log.append(f"Merge Birth Mother href={href!r}")
+            if href and not href.startswith("#"):
+                from urllib.parse import urlsplit, urljoin
+
+                target = urljoin(active.url, href)
+                log.append(f"Navigating directly to merge form: {target}")
+                # Capture popup if SAM opens one
+                try:
+                    with active.expect_popup(timeout=3000) as popup_info:
+                        merge_link.click(force=True)
+                    active = popup_info.value
+                    log.append(f"Merge opened popup: {active.url}")
+                    merge_opened = True
+                except Exception:  # noqa: BLE001
+                    active.goto(target, wait_until="domcontentloaded")
+                    active.wait_for_timeout(1500)
+                    log.append(f"Merge form URL now: {active.url}")
+                    merge_opened = True
+            else:
+                ok = _maybe_click(active, SELECTORS["merge_birth_mother"], dry_run=False, log=log) and ok
+                merge_opened = ok
+        except Exception as exc:  # noqa: BLE001
+            log.append(f"Direct merge navigation failed ({exc}); falling back to click")
+            ok = _maybe_click(active, SELECTORS["merge_birth_mother"], dry_run=False, log=log) and ok
+            merge_opened = ok
+    else:
+        ok = _maybe_click(active, SELECTORS["merge_birth_mother"], dry_run=True, log=log) and ok
+        merge_opened = ok
+
+    if not dry_run and merge_opened:
         active.wait_for_timeout(1500)
-        # If Merge opened another tab, switch to the newest one
         if all_pages is not None:
             try:
-                context = active.context
-                refreshed = context.pages
-                if refreshed and refreshed[-1] is not active:
-                    active = refreshed[-1]
-                    log.append(f"Switched to newest tab after Merge click: {active.url}")
-                    active.wait_for_timeout(1000)
+                refreshed = active.context.pages
+                if refreshed and refreshed[-1].url != active.url:
+                    # If a newer distinct page appeared, prefer it
+                    newest = refreshed[-1]
+                    if "merge" in (newest.url or "").lower() or newest is not active:
+                        if newest.url != active.url:
+                            active = newest
+                            log.append(f"Switched to newest tab after Merge: {active.url}")
             except Exception as exc:  # noqa: BLE001
                 log.append(f"Could not check for new merge tab: {exc}")
         dump_visible_controls(active, log)
