@@ -75,6 +75,16 @@ class SamPlaybookTests(unittest.TestCase):
             self.assertIn("Invalid JSON", str(ctx.exception))
             self.assertIn("line", str(ctx.exception))
 
+    def test_page_looks_missing_detects_not_found_text(self):
+        from sam_rpa_local import _page_looks_missing
+        from unittest.mock import MagicMock
+
+        page = MagicMock()
+        page.url = "https://example.test/SAM/Ch/Ch_M_Vw.aspx?chmid=11008"
+        page.title.return_value = "SAM"
+        page.locator.return_value.inner_text.return_value = "Birth Mother Not Found"
+        self.assertEqual(_page_looks_missing(page), "birth_mother_not_found")
+
     def test_save_confirm_js_is_nonblocking(self):
         # Guardrail: Save/Yes must be scheduled via setTimeout so CDP cannot hang
         # on a synchronous window.confirm() inside evaluate().

@@ -427,27 +427,94 @@ def find_profile_page(pages, chmid: str):
     """Return an open tab whose URL contains chmid=..., else None."""
     needle = f"chmid={chmid}"
     for page in pages:
-        if needle in (page.url or ""):
-            return page
+        try:
+            if needle in (page.url or ""):
+                return page
+        except Exception:  # noqa: BLE001
+            continue
     return None
 
 
-def open_profile(page, chmid: str, *, dry_run: bool, log: list[str]):
-    """Navigate current page to the birth-mother cover page for chmid."""
-    # Keep same origin; only swap path/query
+def _page_looks_missing(page) -> str | None:
+    """Return a reason if the open page is a missing/invalid birth-mother profile."""
+    try:
+        url = page.url or ""
+    except Exception as exc:  # noqa: BLE001
+        return f"page_closed:{exc.__class__.__name__}"
+    try:
+        title = (page.title() or "").strip()
+    except Exception:  # noqa: BLE001
+        title = ""
+    try:
+        body = page.locator("body").inner_text(timeout=2000)
+    except Exception:  # noqa: BLE001
+        body = ""
+    text = f"{title}\n{body}"
+    if re.search(r"birth\s*mother\s*not\s*found", text, re.I):
+        return "birth_mother_not_found"
+    if re.search(r"record\s*not\s*found|page\s*not\s*found|no\s*longer\s*exists", text, re.I):
+        return "record_not_found"
+    if "Ch_M_Vw.aspx" in url and re.search(r"not\s*found", text, re.I):
+        return "profile_not_found"
+    return None
+
+
+def open_profile(page, chmid: str, *, dry_run: bool, log: list[str]) -> str | None:
+    """
+    Navigate current page to the birth-mother cover page for chmid.
+
+    Returns None on success, or a skip/error reason string.
+    """
     from urllib.parse import urlsplit, urlunsplit
 
-    parts = urlsplit(page.url)
+    try:
+        parts = urlsplit(page.url)
+    except Exception as exc:  # noqa: BLE001
+        return f"page_closed_before_nav:{exc.__class__.__name__}"
     path = PROFILE_PATH_TEMPLATE.format(chmid=chmid)
     target = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
     if dry_run:
         log.append(f"DRY-RUN would open profile: {target}")
-        return True
+        return None
     log.append(f"Opening profile: {target}")
-    page.goto(target, wait_until="domcontentloaded")
-    page.wait_for_timeout(1500)
-    log.append(f"Opened profile URL now: {page.url}")
-    return True
+    try:
+        page.goto(target, wait_until="domcontentloaded")
+        page.wait_for_timeout(1200)
+    except Exception as exc:  # noqa: BLE001
+        msg = f"{exc.__class__.__name__}: {exc}"
+        log.append(f"Open profile failed: {msg}")
+        return f"navigation_failed:{exc.__class__.__name__}"
+    try:
+        log.append(f"Opened profile URL now: {page.url}")
+    except Exception:  # noqa: BLE001
+        return "page_closed_after_nav"
+    missing = _page_looks_missing(page)
+    if missing:
+        log.append(f"Profile page indicates missing record ({missing}) for chmid={chmid}")
+        return missing
+    return None
+
+
+def pick_live_page(browser, preferred=None):
+    """Return an open page we can keep working on after a tab closes."""
+    if preferred is not None:
+        try:
+            _ = preferred.url
+            return preferred
+        except Exception:  # noqa: BLE001
+            pass
+    for context in getattr(browser, "contexts", []) or []:
+        for candidate in list(getattr(context, "pages", []) or []):
+            try:
+                _ = candidate.url
+                return candidate
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            return context.new_page()
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 # Patch confirm/alert on this window + reachable child frames.
@@ -747,23 +814,63 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
 
     # Prefer an already-open duplicate profile tab; otherwise navigate there.
     active = page
+    open_error: str | None = None
     if all_pages:
         existing = find_profile_page(all_pages, dup_id)
         if existing is not None:
             active = existing
             log.append(f"Using already-open duplicate tab: {active.url}")
+            if not dry_run:
+                open_error = _page_looks_missing(active)
         else:
-            open_profile(active, dup_id, dry_run=dry_run, log=log)
-    elif "chmid=" not in (active.url or ""):
-        open_profile(active, dup_id, dry_run=dry_run, log=log)
+            open_error = open_profile(active, dup_id, dry_run=dry_run, log=log)
+    elif "chmid=" not in (getattr(active, "url", "") or ""):
+        open_error = open_profile(active, dup_id, dry_run=dry_run, log=log)
+    else:
+        # Already on some profile; force navigation to the duplicate for this pair.
+        open_error = open_profile(active, dup_id, dry_run=dry_run, log=log)
 
-    log.append(f"Working page URL: {active.url}")
+    if open_error:
+        status = "skipped_missing_profile"
+        return {
+            "id": item.get("id"),
+            "status": status,
+            "skip_reason": open_error,
+            "master_birth_mother_id": master_id,
+            "duplicate_birth_mother_id": dup_id,
+            "log": log,
+            "ok": True,
+        }
+
+    try:
+        log.append(f"Working page URL: {active.url}")
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "id": item.get("id"),
+            "status": "failed_page_closed",
+            "skip_reason": str(exc),
+            "master_birth_mother_id": master_id,
+            "duplicate_birth_mother_id": dup_id,
+            "log": log + [f"Page closed before merge UI: {exc}"],
+            "ok": False,
+        }
 
     ok = True
     ok = _maybe_click(active, SELECTORS["advanced_options"], dry_run=dry_run, log=log) and ok
     if not dry_run:
         # ADVANCED OPTIONS is a Bootstrap collapse; wait for menu items
-        active.wait_for_timeout(2000)
+        try:
+            active.wait_for_timeout(2000)
+        except Exception as exc:  # noqa: BLE001
+            log.append(f"Wait after ADVANCED OPTIONS failed: {exc}")
+            return {
+                "id": item.get("id"),
+                "status": "failed_page_closed",
+                "master_birth_mother_id": master_id,
+                "duplicate_birth_mother_id": dup_id,
+                "log": log,
+                "ok": False,
+            }
         try:
             active.get_by_text(re.compile(r"Merge\s+Birth\s+Mother", re.I)).first.wait_for(
                 state="visible", timeout=10000
@@ -772,7 +879,10 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
         except Exception:  # noqa: BLE001
             # Try clicking ADVANCED OPTIONS again if collapsed
             _maybe_click(active, SELECTORS["advanced_options"], dry_run=False, log=log)
-            active.wait_for_timeout(1500)
+            try:
+                active.wait_for_timeout(1500)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 active.get_by_text(re.compile(r"Merge\s+Birth\s+Mother", re.I)).first.wait_for(
                     state="visible", timeout=8000
@@ -972,11 +1082,38 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"SKIP {item.get('id')}: {skip}")
                 continue
 
+            page = pick_live_page(browser, page)
+            if page is None:
+                entry = {
+                    "id": item.get("id"),
+                    "status": "failed_no_browser_page",
+                    "ok": False,
+                    "log": ["No open Chrome page available — is debug Chrome still running?"],
+                }
+                results.append(entry)
+                print(f"FAIL {item.get('id')}: no open Chrome page")
+                break
+
+            try:
+                pages = list(page.context.pages)
+            except Exception:  # noqa: BLE001
+                pages = [page]
+
             print(f"Processing {item.get('id')} ...")
-            entry = run_one_merge(page, item, dry_run=args.dry_run, all_pages=pages)
+            try:
+                entry = run_one_merge(page, item, dry_run=args.dry_run, all_pages=pages)
+            except Exception as exc:  # noqa: BLE001
+                entry = {
+                    "id": item.get("id"),
+                    "status": "failed_exception",
+                    "ok": False,
+                    "log": [f"Unhandled error: {exc.__class__.__name__}: {exc}"],
+                }
+                # Try to recover a live tab for the next queue item.
+                page = pick_live_page(browser, None)
             results.append(entry)
             print(f"  → {entry['status']}")
-            for line in entry["log"]:
+            for line in entry.get("log") or []:
                 print(f"     {line}")
 
         out_dir = Path(args.output_dir)
@@ -993,7 +1130,8 @@ def main(argv: list[str] | None = None) -> int:
         }
         out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"\nWrote audit log → {out_path}")
-        failures = [r for r in results if not r.get("ok") and r.get("status") != "skipped"]
+        soft = {"skipped", "skipped_missing_profile"}
+        failures = [r for r in results if not r.get("ok") and r.get("status") not in soft]
         return 1 if failures else 0
 
     except Exception as exc:  # noqa: BLE001
