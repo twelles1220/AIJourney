@@ -40,8 +40,7 @@ SELECTORS: dict[str, Any] = {
         "name": "ADVANCED OPTIONS",
     },
     "merge_birth_mother": {
-        "role": "link",
-        "name": "Merge Birth Mother",
+        "text": "Merge Birth Mother",
     },
     # Exact control label may differ — update after inspecting the dialog
     "master_id_input": {
