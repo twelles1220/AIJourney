@@ -369,23 +369,22 @@ python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.
 Goal: stop hand-editing IDs. Export the Duplicate Records report once, generate the full JSON, then batch with `--limit`.
 
 ### 7.1 Export / save the CSV
-- [ ] Export or copy the Duplicate Records report to a `.csv` file
+- [ ] Export the Duplicate Records report to a `.csv` file (SAM often exports UTF-16)
 - [ ] Put it somewhere easy, e.g. `outputs\duplicates.csv`
-- [ ] Ideal columns (names can vary — the script has aliases):
-  - left/right Birth Mother IDs
-  - left/right names
-  - left/right SF Migration Contact ID (if present)
-  - match reason (`name` / `phone`)
-  - notes flags if available
+- [ ] This export is usually **one profile per row** (not left/right columns). That is fine — the converter groups exact Full Name matches.
 
 ### 7.2 Generate the queue
 - [ ] Run:
 
 ```powershell
-python sam_queue_from_csv.py outputs\duplicates.csv -o outputs\sam_merge_queue.json --approve-name
+git pull origin cursor/sam-local-rpa-guide-8d37
+python sam_queue_from_csv.py outputs\duplicates.csv -o outputs\sam_merge_queue.json --approve-name --approved-only
 ```
 
-- [ ] Confirm the printed stats (approved name vs phone-manual vs skipped)
+- [ ] Confirm the printed stats:
+  - `name_groups_2` → size-2 exact name pairs (approved)
+  - `name_groups_3plus` → larger groups held as `review_needed` unless you also pass `--approve-multi`
+- [ ] Master rule used: SF Migration Contact ID if present, else lower Birth Mother ID
 
 ### 7.3 Batch merges
 - [ ] Keep Chrome logged in on the debug port
@@ -396,11 +395,11 @@ python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.
 ```
 
 - [ ] Raise `--limit` only after a batch looks clean
-- [ ] Phone matches stay `review_needed` and are skipped automatically
+- [ ] Re-export the CSV later and regenerate the queue as merges clear the report
 
 ### 7.4 Or send the CSV here
-- [ ] Paste/upload the CSV (or at least the header row + a few sample rows)
-- [ ] I will map columns and generate `outputs\sam_merge_queue.json` for you
+- [ ] Paste/upload the CSV
+- [ ] I will map columns and tell you the approved pair count / next `--limit` command
 
 ---
 
