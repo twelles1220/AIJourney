@@ -198,6 +198,21 @@ class SamPlaybookTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(captured, ["pair-003", "pair-004"])
 
+    def test_pause_controller_enter_toggles(self):
+        pause = PauseController()
+        pause._on_enter()
+        self.assertTrue(pause._pause_after_current)
+        # Cancel pending pause
+        pause._on_enter()
+        self.assertFalse(pause._pause_after_current)
+        # Request again and simulate checkpoint reaching pause
+        pause._on_enter()
+        with pause._lock:
+            pause._paused = True
+            pause._pause_after_current = False
+        pause._on_enter()
+        self.assertFalse(pause._paused)
+
 
 if __name__ == "__main__":
     unittest.main()
