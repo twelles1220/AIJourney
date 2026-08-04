@@ -11,6 +11,7 @@ from agents.sam_playbook import choose_master, should_skip_item
 from sam_rpa_local import (
     _SAVE_SCHEDULE_JS,
     _YES_SCHEDULE_JS,
+    PauseController,
     load_queue,
     main,
     normalize_item,

@@ -16,6 +16,7 @@ import argparse
 import json
 import re
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,81 @@ from agents.sam_playbook import (
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+class PauseController:
+    """
+    Free-run pause/resume via Enter in the terminal.
+
+    First Enter  → finish the current pair, then pause
+    Second Enter → resume
+    (If pause is pending but not yet reached, Enter cancels the pending pause)
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pause_after_current = False
+        self._paused = False
+        self._stop_watcher = False
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._watch_stdin, name="sam-pause", daemon=True)
+        self._thread.start()
+        print(
+            "Pause enabled: press Enter anytime to pause after the current pair; "
+            "press Enter again to resume.",
+            flush=True,
+        )
+
+    def stop(self) -> None:
+        self._stop_watcher = True
+
+    def _watch_stdin(self) -> None:
+        while not self._stop_watcher:
+            try:
+                line = sys.stdin.readline()
+            except Exception:  # noqa: BLE001
+                break
+            if line == "":
+                # EOF / redirected stdin — disable further pause attempts
+                break
+            self._on_enter()
+
+    def _on_enter(self) -> None:
+        with self._lock:
+            if self._paused:
+                self._paused = False
+                self._pause_after_current = False
+                print("\n>>> RESUMED\n", flush=True)
+            elif self._pause_after_current:
+                self._pause_after_current = False
+                print("\n>>> Pause canceled — continuing\n", flush=True)
+            else:
+                self._pause_after_current = True
+                print(
+                    "\n>>> Pause requested — will pause after the current pair finishes\n",
+                    flush=True,
+                )
+
+    def checkpoint(self, label: str = "") -> None:
+        """Call between pairs. Blocks while paused."""
+        with self._lock:
+            if self._pause_after_current:
+                self._paused = True
+                self._pause_after_current = False
+            paused = self._paused
+        if not paused:
+            return
+        where = f" ({label})" if label else ""
+        print(f"\n>>> PAUSED{where}. Press Enter to resume.\n", flush=True)
+        while True:
+            with self._lock:
+                if not self._paused:
+                    return
+            time.sleep(0.15)
 
 
 def load_queue(path: Path) -> list[dict]:
@@ -1011,6 +1087,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Process only this queue item id (repeatable), e.g. --id pair-003",
     )
     parser.add_argument(
+        "--enable-pause",
+        action="store_true",
+        help="Press Enter in this terminal to pause after the current pair; Enter again to resume",
+    )
+    parser.add_argument(
         "--output-dir",
         default="outputs/sam_rpa",
         help="Where to write the run audit log",
@@ -1018,6 +1099,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     pw = browser = None
+    pause = PauseController() if args.enable_pause else None
     try:
         print(f"Connecting to Chrome via CDP: {args.cdp}")
         pw, browser = connect_browser(args.cdp)
@@ -1060,6 +1142,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.item_ids:
             print(f"Filtered to id(s): {', '.join(args.item_ids)}")
         print(f"Mode: {'DRY-RUN' if args.dry_run else 'LIVE'}")
+        if pause is not None:
+            pause.start()
 
         contexts = browser.contexts
         if not contexts:
@@ -1079,6 +1163,9 @@ def main(argv: list[str] | None = None) -> int:
 
         results: list[dict] = []
         for item in items:
+            if pause is not None:
+                pause.checkpoint(f"before {item.get('id')}")
+
             skip = item.get("_skip_reason") or should_skip_item(item)
             if skip:
                 entry = {
@@ -1126,6 +1213,9 @@ def main(argv: list[str] | None = None) -> int:
             for line in entry.get("log") or []:
                 print(f"     {line}")
 
+            if pause is not None:
+                pause.checkpoint(f"after {item.get('id')}")
+
         out_dir = Path(args.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1148,6 +1238,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Runner error: {exc}", file=sys.stderr)
         return 1
     finally:
+        if pause is not None:
+            pause.stop()
         if pw is not None:
             # Do NOT browser.close() — that would close the user's Chrome.
             pw.stop()
