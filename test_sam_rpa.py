@@ -121,7 +121,7 @@ class SamPlaybookTests(unittest.TestCase):
             path.write_text(json.dumps(queue), encoding="utf-8")
             captured: list[str] = []
 
-            def fake_run(page, item, *, dry_run, all_pages=None):
+            def fake_run(page, item, *, dry_run, all_pages=None, pause=None):
                 captured.append(item["id"])
                 return {"id": item["id"], "status": "dry_run_ok", "ok": True, "log": []}
 
@@ -168,7 +168,7 @@ class SamPlaybookTests(unittest.TestCase):
             path.write_text(json.dumps(queue), encoding="utf-8")
             captured: list[str] = []
 
-            def fake_run(page, item, *, dry_run, all_pages=None):
+            def fake_run(page, item, *, dry_run, all_pages=None, pause=None):
                 captured.append(item["id"])
                 return {"id": item["id"], "status": "dry_run_ok", "ok": True, "log": []}
 

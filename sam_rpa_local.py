@@ -1074,7 +1074,7 @@ def run_one_merge(
         return _abort("after_merge_iframe_open")
 
     if not dry_run and merge_opened:
-        merge_ctx, note = find_merge_frame(active, timeout_ms=12000)
+        merge_ctx, note = find_merge_frame(active, timeout_ms=12000, pause=pause)
         log.append(f"Merge frame search: {note}")
         if merge_ctx is not None:
             active = merge_ctx
