@@ -12,7 +12,6 @@ import csv
 import hashlib
 import json
 import random
-import re
 from pathlib import Path
 from typing import Any
 

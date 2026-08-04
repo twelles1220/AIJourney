@@ -1,0 +1,4 @@
+left_birth_mother_id,left_full_name,left_sf_migration_contact_id,right_birth_mother_id,right_full_name,right_sf_migration_contact_id,match_reason,left_has_notes,right_has_notes
+3288,Jamie Connelly,,11075,Jamie Connelly,,name,false,false
+3310,Jamie Corbet,,8316,Jamie Corbet,,name,false,false
+100,Phone Only A,,200,Phone Only B,,phone,false,false

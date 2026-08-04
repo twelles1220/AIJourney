@@ -1,0 +1,425 @@
+# SAM Local RPA — Literal Step-by-Step Checklist
+
+Follow this in order. Do not skip ahead.  
+Check each box only after that tiny action is done.
+
+Your Loom reference:  
+https://www.loom.com/share/55df212f59a247799830c617cf804470
+
+---
+
+# STEP 1 — Install tools on your laptop (one time)
+
+Goal: your computer can run the RPA script.
+
+### 1.1 Open a terminal
+- [ ] Windows: open **PowerShell**
+- [ ] Mac: open **Terminal**
+
+### 1.2 Get the project onto your computer (if you don’t have it yet)
+
+`/path/to/AIJourney` in older notes was only a **placeholder**. Use a real folder.
+
+**Windows (PowerShell) — recommended:**
+
+- [ ] Make a projects folder:
+
+```powershell
+mkdir $HOME\Projects -ErrorAction SilentlyContinue
+cd $HOME\Projects
+```
+
+- [ ] Clone the repo (only if `AIJourney` is not already there):
+
+```powershell
+git clone https://github.com/twelles1220/AIJourney.git
+cd AIJourney
+```
+
+- [ ] Switch to the branch with the SAM guide:
+
+```powershell
+git fetch origin
+git checkout cursor/sam-local-rpa-guide-8d37
+```
+
+**If you already cloned it earlier:**
+
+- [ ] Find it:
+
+```powershell
+Get-ChildItem -Path $HOME -Filter AIJourney -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+```
+
+- [ ] Then `cd` into the path it prints, for example:
+
+```powershell
+cd $HOME\Projects\AIJourney
+```
+
+### 1.3 Confirm you are in the right folder
+- [ ] Run:
+
+```powershell
+pwd
+dir
+```
+
+- [ ] You should see files like `sam_rpa_local.py`, `docs`, `agents`
+- [ ] If you do **not** see `sam_rpa_local.py`, you are in the wrong folder — go back to 1.2
+
+### 1.4 Create a Python virtual environment
+- [ ] Windows (try this first):
+
+```powershell
+python -m venv .venv
+```
+
+- [ ] If `python` is not found, try:
+
+```powershell
+py -3 -m venv .venv
+```
+
+- [ ] Wait until it finishes with no error
+
+### 1.5 Turn the virtual environment on
+- [ ] Windows:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+- [ ] If PowerShell blocks activation, run this once, then retry activate:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+- [ ] Confirm it worked: your prompt should show `(.venv)`
+
+### 1.6 Install Python packages
+- [ ] Run:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m pip install playwright
+```
+
+- [ ] Wait until both finish with no error
+
+### 1.7 Install browser files Playwright needs
+- [ ] Run:
+
+```powershell
+playwright install chromium
+```
+
+- [ ] Wait until it finishes
+
+### 1.8 Confirm Step 1 is done
+- [ ] Run:
+
+```powershell
+python sam_rpa_local.py --help
+```
+
+- [ ] You should see help text (flags like `--queue`, `--dry-run`, `--live`)
+- [ ] **Step 1 complete**
+
+---
+
+# STEP 2 — Build an approved merge queue
+
+Goal: create a small JSON file listing what to merge (1 pair for the first try).
+
+### 2.1 Create the outputs folder
+- [ ] In the same terminal (venv still on), run:
+
+```powershell
+mkdir outputs -ErrorAction SilentlyContinue
+```
+
+### 2.2 Copy the example queue file
+- [ ] Run:
+
+```powershell
+Copy-Item samples\sam_merge_queue.example.json outputs\sam_merge_queue.json
+```
+
+### 2.3 Open the queue file in an editor
+- [ ] Open `outputs/sam_merge_queue.json` in Cursor / VS Code / Notepad
+
+### 2.4 Replace the example with ONE real approved pair
+For that one pair, fill in:
+
+- [ ] `master.birth_mother_id` = the master profile’s Birth Mother ID
+- [ ] `master.full_name` = master name
+- [ ] `master.sf_migration_contact_id` = the SF Migration Contact ID if it has one (or `null`)
+- [ ] `duplicate.birth_mother_id` = the duplicate’s Birth Mother ID
+- [ ] `duplicate.full_name` = duplicate name
+- [ ] `decision` must be exactly `"approved"`
+- [ ] `match_reason` must be `"name"` for this first run (not `"phone"`)
+
+### 2.5 Double-check master choice (from your Loom rules)
+Before saving, confirm:
+
+- [ ] Master is the one with **SF Migration Contact ID** when only one has it
+- [ ] If both have SF Migration Contact ID, master has the **lower Birth Mother ID**
+- [ ] You are **not** merging a pair where both have conflicting notes
+- [ ] This is a **name** match, not phone-only
+
+### 2.6 Save the file
+- [ ] Save `outputs/sam_merge_queue.json`
+- [ ] **Step 2 complete**
+
+---
+
+# STEP 3 — Start Chrome and log into SAM yourself
+
+Goal: Chrome is open in “debug mode,” you are logged into SAM, Duplicate Records page is visible.
+
+### 3.1 Fully quit Chrome
+- [ ] Close all Chrome windows
+- [ ] Mac: Chrome menu → Quit Google Chrome  
+- [ ] Windows: make sure Chrome is not still running in the system tray
+
+### 3.2 Start Chrome with remote debugging
+Open a **new** terminal window (leave your Python venv terminal alone).
+
+- [ ] Mac — paste and run:
+
+```bash
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/chrome-sam-rpa-profile"
+```
+
+- [ ] Windows PowerShell — paste and run:
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" `
+  --remote-debugging-port=9222 `
+  --user-data-dir="$env:USERPROFILE\chrome-sam-rpa-profile"
+```
+
+- [ ] Linux:
+
+```bash
+google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/chrome-sam-rpa-profile"
+```
+
+- [ ] A Chrome window opens
+
+### 3.3 Log into SAM in that Chrome window
+- [ ] Go to your normal SAM URL
+- [ ] Complete username/password
+- [ ] Complete SSO / 2FA if asked
+- [ ] Confirm you can see the normal SAM home/dashboard
+
+### 3.4 Open the Duplicate Records page
+- [ ] Navigate to the same Duplicate Records report/alert page from your Loom
+- [ ] Confirm you can see the duplicate list / alert screen
+- [ ] Leave this Chrome window open (do not close it)
+- [ ] **Step 3 complete**
+
+---
+
+# STEP 4 — Dry-run (practice, no real merge)
+
+Goal: prove the script can attach to your Chrome and read the queue. No Save/confirm merge.
+
+### 4.1 Go back to your Python terminal
+- [ ] Make sure `(.venv)` is still showing
+- [ ] If not, activate again:
+
+```powershell
+cd $HOME\Projects\AIJourney
+.\.venv\Scripts\Activate.ps1
+```
+
+- [ ] Confirm you are in the repo:
+
+```powershell
+pwd
+dir sam_rpa_local.py
+```
+
+### 4.2 Run dry-run
+- [ ] Run:
+
+```powershell
+python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.0.1:9222 --dry-run
+```
+
+### 4.3 Check the terminal output
+You want to see all of these:
+
+- [ ] `Loaded 1 queue item(s)` (or however many you put in the queue)
+- [ ] `Mode: DRY-RUN`
+- [ ] `Connecting to Chrome via CDP...`
+- [ ] `Attached. Active page: ...` (some SAM URL)
+- [ ] Lines that say `DRY-RUN would click...` / `DRY-RUN would paste...`
+- [ ] `Wrote audit log → outputs/sam_rpa/...`
+
+### 4.4 If dry-run fails
+- [ ] If it says it cannot connect to browser → repeat Step 3 (Chrome must be started with port `9222`)
+- [ ] If it skips your item → check `decision` is `"approved"` and `match_reason` is not `"phone"`
+- [ ] Fix the issue, then run the dry-run command again
+
+### 4.5 Confirm Step 4 is done
+- [ ] Dry-run finished without a connection error
+- [ ] Audit file exists under `outputs/sam_rpa/`
+- [ ] **Step 4 complete**
+
+---
+
+# STEP 5 — First live merge (exactly 1 record, you watch)
+
+Goal: one real merge while you watch the screen.
+
+### 5.1 Pre-flight checks
+- [ ] Chrome is still open and still logged into SAM
+- [ ] Duplicate Records page is still available
+- [ ] Your queue still has only the pair(s) you intend
+- [ ] You are ready to watch the Chrome window
+
+### 5.2 Run live for one specific pair
+- [ ] In the Python terminal, run the pair by **id** (profile IDs are on the queue row; report sort order does not matter):
+
+```powershell
+python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.0.1:9222 --live --confirm-live --id pair-003
+```
+
+Or use `--limit 1` only when the first remaining queue row is the pair you want.
+
+### 5.3 Watch Chrome during the run
+Watch for the script trying to:
+
+- [ ] Open **Advanced Options**
+- [ ] Open **Merge Birth Mother**
+- [ ] Paste the **master Birth Mother ID**
+- [ ] Click **Save**
+- [ ] Confirm **Yes, merge these records**
+
+If PowerShell prints `If Yes/No is still visible in Chrome, click YES now`, do that in Chrome. The runner waits up to 90 seconds for the merge window to close instead of hanging on a Playwright click.
+
+### 5.4 Verify in SAM (manual confirmation)
+After the script finishes:
+
+- [ ] Refresh the Duplicate Records / alert page
+- [ ] Confirm the duplicate no longer appears (same check as in your Loom)
+- [ ] Open the master profile and confirm it still looks right
+
+### 5.5 If something looks wrong
+- [ ] Stop immediately (do not raise `--limit`)
+- [ ] If Yes/No is stuck on screen: click **Yes** yourself, wait for the script timeout or Ctrl+C, then `git pull` and re-run `--limit 1`
+- [ ] Note which button/label failed
+- [ ] Tell me the exact on-screen button text so we can update selectors in `agents/sam_playbook.py`
+
+### 5.6 Confirm Step 5 is done
+- [ ] One merge attempted
+- [ ] You verified the result in SAM
+- [ ] Audit log written under `outputs/sam_rpa/`
+- [ ] **Step 5 complete**
+
+---
+
+# STEP 6 — Scale up only after Step 5 worked
+
+Goal: do a few more merges safely.
+
+### 6.1 Add more approved pairs to the queue
+- [ ] Edit `outputs/sam_merge_queue.json`
+- [ ] Add only pairs you have approved
+- [ ] Keep `match_reason` as `"name"` for now
+- [ ] Save the file
+
+### 6.2 Dry-run the bigger queue
+- [ ] Run the same dry-run command from Step 4.2
+- [ ] Confirm every item is planned or intentionally skipped
+- [ ] Fix any bad rows before live
+
+### 6.3 Live small batch
+- [ ] Start small:
+
+```powershell
+python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.0.1:9222 --live --confirm-live --limit 3
+```
+
+- [ ] Watch the first one or two
+- [ ] Spot-check results in SAM
+
+### 6.4 Raise the limit gradually
+- [ ] Only if the small batch looked correct
+- [ ] Increase `--limit` slowly (3 → 10)
+- [ ] Keep doing name-based pairs only
+- [ ] Leave phone-only matches for manual work
+
+### 6.5 End-of-session shutdown
+- [ ] Stop the Python command if it is still running
+- [ ] You may close the debug Chrome window when finished
+- [ ] Keep the audit files in `outputs/sam_rpa/` for your records
+- [ ] **Step 6 complete**
+
+---
+
+# STEP 7 — Build the full queue from a CSV export (optional)
+
+Goal: stop hand-editing IDs. Export the Duplicate Records report once, generate the full JSON, then batch with `--limit`.
+
+### 7.1 Export / save the CSV
+- [ ] Export the Duplicate Records report to a `.csv` file (SAM often exports UTF-16)
+- [ ] Put it somewhere easy, e.g. `outputs\duplicates.csv`
+- [ ] This export is usually **one profile per row** (not left/right columns). That is fine — the converter groups exact Full Name matches.
+
+### 7.2 Generate the queue
+- [ ] Run:
+
+```powershell
+git pull origin cursor/sam-local-rpa-guide-8d37
+python sam_queue_from_csv.py outputs\duplicates.csv -o outputs\sam_merge_queue.json --approve-name --approved-only
+```
+
+- [ ] Confirm the printed stats:
+  - `name_groups_2` → size-2 exact name pairs (approved)
+  - `name_groups_3plus` → larger groups held as `review_needed` unless you also pass `--approve-multi`
+- [ ] Master rule used: SF Migration Contact ID if present, else lower Birth Mother ID
+
+### 7.3 Batch merges
+- [ ] Keep Chrome logged in on the debug port
+- [ ] Run batches:
+
+```powershell
+python sam_rpa_local.py --queue outputs\sam_merge_queue.json --cdp http://127.0.0.1:9222 --live --confirm-live --limit 3
+```
+
+- [ ] Raise `--limit` only after a batch looks clean
+- [ ] Re-export the CSV later and regenerate the queue as merges clear the report
+
+### 7.4 Or send the CSV here
+- [ ] Paste/upload the CSV
+- [ ] I will map columns and tell you the approved pair count / next `--limit` command
+
+---
+
+# Quick “where am I?” checklist
+
+- [ ] Step 1 done = `python sam_rpa_local.py --help` works  
+- [ ] Step 2 done = `outputs\sam_merge_queue.json` has a real approved pair  
+- [ ] Step 3 done = debug Chrome open + logged into SAM + Duplicate Records visible  
+- [ ] Step 4 done = dry-run attached and wrote an audit log  
+- [ ] Step 5 done = one live merge verified in SAM  
+- [ ] Step 6 done = small batch successful  
+- [ ] Step 7 done = CSV → full queue → batched `--limit` runs  
+
+---
+
+# Do-not-do list
+
+- Do not run `--live` before a successful dry-run
+- Do not run without `--confirm-live`
+- Do not start with more than `--limit 1`
+- Do not include phone-only matches in v1
+- Do not merge when both profiles have conflicting notes
+- Do not put SAM passwords into the cloud agent chat
