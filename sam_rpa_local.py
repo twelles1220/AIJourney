@@ -40,15 +40,14 @@ class PauseController:
     """
     Free-run pause/resume via Enter in the terminal.
 
-    First Enter  → finish the current pair, then pause
-    Second Enter → resume
-    (If pause is pending but not yet reached, Enter cancels the pending pause)
+    First Enter  → abort the current pair ASAP (before Save when possible) and pause
+    Second Enter → resume with the next pair
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._pause_after_current = False
         self._paused = False
+        self._abort_current = False
         self._stop_watcher = False
         self._thread: threading.Thread | None = None
 
@@ -58,8 +57,8 @@ class PauseController:
         self._thread = threading.Thread(target=self._watch_stdin, name="sam-pause", daemon=True)
         self._thread.start()
         print(
-            "Pause enabled: press Enter anytime to pause after the current pair; "
-            "press Enter again to resume.",
+            "Pause enabled: press Enter anytime to abort the current pair "
+            "(before Save when possible) and pause; press Enter again to resume.",
             flush=True,
         )
 
@@ -73,7 +72,6 @@ class PauseController:
             except Exception:  # noqa: BLE001
                 break
             if line == "":
-                # EOF / redirected stdin — disable further pause attempts
                 break
             self._on_enter()
 
@@ -81,24 +79,23 @@ class PauseController:
         with self._lock:
             if self._paused:
                 self._paused = False
-                self._pause_after_current = False
-                print("\n>>> RESUMED\n", flush=True)
-            elif self._pause_after_current:
-                self._pause_after_current = False
-                print("\n>>> Pause canceled — continuing\n", flush=True)
+                self._abort_current = False
+                print("\n>>> RESUMED — continuing with the next pair\n", flush=True)
             else:
-                self._pause_after_current = True
+                self._paused = True
+                self._abort_current = True
                 print(
-                    "\n>>> Pause requested — will pause after the current pair finishes\n",
+                    "\n>>> PAUSE — aborting current pair now (will not Save if we haven't yet)\n",
                     flush=True,
                 )
 
-    def checkpoint(self, label: str = "") -> None:
-        """Call between pairs. Blocks while paused."""
+    def should_abort(self) -> bool:
         with self._lock:
-            if self._pause_after_current:
-                self._paused = True
-                self._pause_after_current = False
+            return self._abort_current or self._paused
+
+    def checkpoint(self, label: str = "") -> None:
+        """Block while paused (call between pairs / after abort)."""
+        with self._lock:
             paused = self._paused
         if not paused:
             return
@@ -107,8 +104,30 @@ class PauseController:
         while True:
             with self._lock:
                 if not self._paused:
+                    # Clear abort so the next pair can run normally
+                    self._abort_current = False
                     return
             time.sleep(0.15)
+
+
+def _paused_abort_result(
+    item: dict,
+    log: list[str],
+    *,
+    master_id: str,
+    dup_id: str,
+    where: str,
+) -> dict[str, Any]:
+    log.append(f"Aborted for pause at: {where}")
+    return {
+        "id": item.get("id"),
+        "status": "paused_aborted",
+        "skip_reason": f"operator_pause:{where}",
+        "master_birth_mother_id": master_id,
+        "duplicate_birth_mother_id": dup_id,
+        "log": log,
+        "ok": True,
+    }
 
 
 def load_queue(path: Path) -> list[dict]:
@@ -356,17 +375,17 @@ def _maybe_fill_fallback(page, spec: dict, value: str, *, log: list[str]) -> boo
     return False
 
 
-def find_merge_frame(page, *, timeout_ms: int = 10000):
+def find_merge_frame(page, *, timeout_ms: int = 10000, pause: PauseController | None = None):
     """
     The Merge Entities UI is a modal and may live in an iframe.
     Poll the main page + all frames for 'Merge To' / 'Merge Entities'.
     Returns (frame_or_page, log_note).
     """
-    import time
-
     deadline = time.time() + (timeout_ms / 1000)
     last_note = "no merge frame yet"
     while time.time() < deadline:
+        if pause is not None and pause.should_abort():
+            return None, "aborted_for_pause"
         candidates = [page, *page.frames]
         for frame in candidates:
             try:
@@ -749,9 +768,17 @@ def _merge_ui_still_open(host_page) -> bool:
     return False
 
 
-def _finish_save_and_confirm(host_page, merge_ctx, log: list[str]) -> bool:
+def _finish_save_and_confirm(
+    host_page,
+    merge_ctx,
+    log: list[str],
+    pause: PauseController | None = None,
+) -> bool | None:
     """
     Save + confirm without hanging PowerShell.
+
+    Returns True/False for save outcome, or None if aborted due to operator pause
+    before Save was scheduled.
 
     Native window.confirm() blocks Playwright CDP calls until dismissed. We:
       1) patch confirm() on every reachable frame
@@ -760,6 +787,10 @@ def _finish_save_and_confirm(host_page, merge_ctx, log: list[str]) -> bool:
       4) schedule on-page Yes clicks via JS (no locator.click)
       5) if UI still open, ask the operator to click Yes and wait for close
     """
+    if pause is not None and pause.should_abort():
+        log.append("Pause abort before Save — merge not committed")
+        return None
+
     dialogs: list[str] = []
 
     def _accept_dialog(dialog) -> None:
@@ -776,6 +807,10 @@ def _finish_save_and_confirm(host_page, merge_ctx, log: list[str]) -> bool:
     host_page.on("dialog", _accept_dialog)
 
     try:
+        if pause is not None and pause.should_abort():
+            log.append("Pause abort before Save — merge not committed")
+            return None
+
         _patch_confirm_everywhere(host_page, merge_ctx, log)
         save_ok = _schedule_save_click(merge_ctx, log)
         if not save_ok:
@@ -801,6 +836,17 @@ def _finish_save_and_confirm(host_page, merge_ctx, log: list[str]) -> bool:
 
         # On-page Yes/No (HTML), not native confirm
         for attempt in range(10):
+            if pause is not None and pause.should_abort():
+                log.append(
+                    "Pause during post-Save confirm wait — "
+                    "if Yes/No is visible, click No in Chrome"
+                )
+                print(
+                    "\n>>> Paused after Save was already clicked. "
+                    "If Yes/No is on screen, click NO in Chrome.\n",
+                    flush=True,
+                )
+                break
             if _schedule_yes_clicks(host_page, log):
                 confirmed = True
             if dialogs and not confirmed:
@@ -826,6 +872,9 @@ def _finish_save_and_confirm(host_page, merge_ctx, log: list[str]) -> bool:
         else:
             log.append("No auto-confirm signal yet — checking for manual Yes/No")
 
+        if pause is not None and pause.should_abort():
+            return save_ok
+
         print(
             "\n>>> If Yes/No is still visible in Chrome, click YES now.\n"
             ">>> Waiting up to 90s for the merge window to close...\n",
@@ -835,6 +884,13 @@ def _finish_save_and_confirm(host_page, merge_ctx, log: list[str]) -> bool:
 
         deadline = time.time() + 90
         while time.time() < deadline:
+            if pause is not None and pause.should_abort():
+                log.append("Pause during manual Yes wait — click No in Chrome if needed")
+                print(
+                    "\n>>> Paused. If Yes/No is on screen, click NO in Chrome.\n",
+                    flush=True,
+                )
+                break
             if dialogs:
                 for d in dialogs:
                     log.append(f"Accepted JS dialog → {d}")
@@ -876,17 +932,32 @@ def _finish_save_and_confirm(host_page, merge_ctx, log: list[str]) -> bool:
                 pass
 
 
-def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = None) -> dict[str, Any]:
+def run_one_merge(
+    page,
+    item: dict,
+    *,
+    dry_run: bool,
+    all_pages: list | None = None,
+    pause: PauseController | None = None,
+) -> dict[str, Any]:
     log: list[str] = []
     master = item.get("master") or {}
     duplicate = item.get("duplicate") or {}
     master_id = str(master.get("birth_mother_id") or "")
     dup_id = str(duplicate.get("birth_mother_id") or "")
 
+    def _abort(where: str) -> dict[str, Any]:
+        return _paused_abort_result(
+            item, log, master_id=master_id, dup_id=dup_id, where=where
+        )
+
     log.append(f"Item {item.get('id')}: master={master_id} duplicate={dup_id}")
     log.append(f"Master reason: {item.get('master_reason') or 'provided_in_queue'}")
     for step in MERGE_STEPS:
         log.append(f"PLAN: {step}")
+
+    if pause is not None and pause.should_abort():
+        return _abort("before_open_profile")
 
     # Prefer an already-open duplicate profile tab; otherwise navigate there.
     active = page
@@ -918,6 +989,9 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
             "ok": True,
         }
 
+    if pause is not None and pause.should_abort():
+        return _abort("after_open_profile")
+
     try:
         log.append(f"Working page URL: {active.url}")
     except Exception as exc:  # noqa: BLE001
@@ -933,6 +1007,8 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
 
     ok = True
     ok = _maybe_click(active, SELECTORS["advanced_options"], dry_run=dry_run, log=log) and ok
+    if pause is not None and pause.should_abort():
+        return _abort("after_advanced_options")
     if not dry_run:
         # ADVANCED OPTIONS is a Bootstrap collapse; wait for menu items
         try:
@@ -947,6 +1023,8 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
                 "log": log,
                 "ok": False,
             }
+        if pause is not None and pause.should_abort():
+            return _abort("during_advanced_options_wait")
         try:
             active.get_by_text(re.compile(r"Merge\s+Birth\s+Mother", re.I)).first.wait_for(
                 state="visible", timeout=10000
@@ -966,6 +1044,9 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
                 log.append("Merge Birth Mother visible after second ADVANCED OPTIONS click")
             except Exception:  # noqa: BLE001
                 log.append("Merge Birth Mother not visible yet; will still attempt click")
+
+    if pause is not None and pause.should_abort():
+        return _abort("before_merge_iframe")
 
     # Prefer opening merge iframe the way SAM does:
     # javascript:GoAddEntIframe('/SAM/Cmn/Ent_Merge.aspx?enttpid=28&entid=7172');
@@ -989,6 +1070,9 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
         ok = True
         merge_opened = True
 
+    if pause is not None and pause.should_abort():
+        return _abort("after_merge_iframe_open")
+
     if not dry_run and merge_opened:
         merge_ctx, note = find_merge_frame(active, timeout_ms=12000)
         log.append(f"Merge frame search: {note}")
@@ -1001,6 +1085,10 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
                 "If the modal is visible on screen, tell me — we may need a different trigger."
             )
         dump_visible_controls(active, log)
+
+    if pause is not None and pause.should_abort():
+        return _abort("before_fill_master_id")
+
     filled = _maybe_fill(active, SELECTORS["master_id_input"], master_id, dry_run=dry_run, log=log)
     if not filled and not dry_run:
         for fallback in (
@@ -1027,13 +1115,18 @@ def run_one_merge(page, item: dict, *, dry_run: bool, all_pages: list | None = N
                 dump_visible_controls(active, log)
     ok = filled and ok
 
+    if pause is not None and pause.should_abort():
+        return _abort("before_save")
+
     if dry_run:
         log.append("DRY-RUN stop point: would Save + confirm merge next")
         status = "dry_run_ok" if ok else "dry_run_selector_issues"
     else:
         # Dialogs / confirm must not block CDP. Use async Save + JS Yes only.
         host_page = active.page if hasattr(active, "page") else active
-        confirmed_ok = _finish_save_and_confirm(host_page, active, log)
+        confirmed_ok = _finish_save_and_confirm(host_page, active, log, pause=pause)
+        if confirmed_ok is None:
+            return _abort("before_save")
         ok = confirmed_ok and ok
         log.append("Waiting for SAM to finish merge...")
         try:
@@ -1089,7 +1182,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--enable-pause",
         action="store_true",
-        help="Press Enter in this terminal to pause after the current pair; Enter again to resume",
+        help="Press Enter to abort the current pair ASAP (before Save when possible) and pause; Enter again resumes",
     )
     parser.add_argument(
         "--output-dir",
@@ -1198,7 +1291,9 @@ def main(argv: list[str] | None = None) -> int:
 
             print(f"Processing {item.get('id')} ...")
             try:
-                entry = run_one_merge(page, item, dry_run=args.dry_run, all_pages=pages)
+                entry = run_one_merge(
+                    page, item, dry_run=args.dry_run, all_pages=pages, pause=pause
+                )
             except Exception as exc:  # noqa: BLE001
                 entry = {
                     "id": item.get("id"),
@@ -1230,7 +1325,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"\nWrote audit log → {out_path}")
-        soft = {"skipped", "skipped_missing_profile"}
+        soft = {"skipped", "skipped_missing_profile", "paused_aborted"}
         failures = [r for r in results if not r.get("ok") and r.get("status") not in soft]
         return 1 if failures else 0
 

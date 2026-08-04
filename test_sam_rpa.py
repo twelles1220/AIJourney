@@ -201,16 +201,10 @@ class SamPlaybookTests(unittest.TestCase):
     def test_pause_controller_enter_toggles(self):
         pause = PauseController()
         pause._on_enter()
-        self.assertTrue(pause._pause_after_current)
-        # Cancel pending pause
+        self.assertTrue(pause.should_abort())
+        self.assertTrue(pause._paused)
         pause._on_enter()
-        self.assertFalse(pause._pause_after_current)
-        # Request again and simulate checkpoint reaching pause
-        pause._on_enter()
-        with pause._lock:
-            pause._paused = True
-            pause._pause_after_current = False
-        pause._on_enter()
+        self.assertFalse(pause.should_abort())
         self.assertFalse(pause._paused)
 
 
